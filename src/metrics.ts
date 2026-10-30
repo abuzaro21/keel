@@ -18,7 +18,8 @@ export type RunMetrics = {
   wastedEffects: number;             // applied effects later redone with different arguments (work thrown away)
   editDistance: number;              // sum over committed revisions
   rejectedObservations: number; staleObservations: number; duplicateObservations: number;
-  latency: { eventId: string; detectMs: number; commitMs: number | null; detectTicks: number; commitTicks: number | null }[];
+  /** Source-event latency in simulated ticks (event observedAt -> detection / commit), and ingress latency in wall ms. */
+  latency: { eventId: string; ingressToDetectMs: number; ingressToCommitMs: number | null; eventToDetectTicks: number; eventToCommitTicks: number | null }[];
 };
 
 export function runMetrics(store: Store, sim: Sim, runId: string): RunMetrics {
@@ -44,11 +45,12 @@ export function runMetrics(store: Store, sim: Sim, runId: string): RunMetrics {
     if (!o) return [];
     const trigId = r.ev.trigger.eventId;
     const commit = rows.find((x) => x.n > r.n && x.ev.t === 'revision' && x.ev.record.trigger?.eventId === trigId);
-    return [{ eventId: trigId, detectMs: r.wall - o.wall, commitMs: commit ? commit.wall - o.wall : null, detectTicks: r.tick - o.tick, commitTicks: commit ? commit.tick - o.tick : null }];
+    const src = r.ev.trigger.observedAt;
+    return [{ eventId: trigId, ingressToDetectMs: r.wall - o.wall, ingressToCommitMs: commit ? commit.wall - o.wall : null, eventToDetectTicks: r.tick - src, eventToCommitTicks: commit ? commit.tick - src : null }];
   }).filter((l, i, a) => a.findIndex((x) => x.eventId === l.eventId) === i);
   const verdicts = evs.flatMap((e) => (e.t === 'verdict' ? [e.v.kind] : []));
   return {
-    runId, policy: start.policy,
+    runId, policy: start.context.policy.name,
     status: status?.t === 'resumed' ? 'running' : status?.t ?? 'running',
     pause: status?.t === 'paused' ? status.reason : null,
     beliefGoalMet: completed && completed.t === 'completed' ? completed.beliefGoalMet : null,

@@ -1,8 +1,13 @@
 // Scenario data. Two domains, three scenarios. The engine never branches on a scenario id:
-// a scenario is action contracts + initial beliefs + a world-time event feed + simulated physics.
+// a scenario is action contracts + initial beliefs + a world-time event feed + SIMULATED physics.
+import { createHash } from 'node:crypto';
 import type { Domain, Facts, Goal, Json, Params, Step } from './model.ts';
 import type { Source } from './world.ts';
 
+/** One tick of the simulated clock = 5 simulated minutes. */
+export const TICK_MIN = 5;
+
+export type SimEffect = { action: string; params: Params; tick: number; harm: string | null };
 /** What really happens in the SIMULATED world when an action runs (the agent never reads this). */
 export type Physics = Record<string, (p: Params, truth: Facts) => { set?: Facts; harm?: string }>;
 export type FeedItem = { tick: number; source: string; fact: string; value: Json; seq?: number; forged?: boolean; replayOf?: number };
@@ -10,13 +15,13 @@ export type Scenario = {
   id: string; title: string; blurb: string;
   domain: Domain; goal: Goal; facts: Facts; plan: Step[];
   sources: Record<string, Source>;
-  /** Ground truth changes in world time. Same for every agent policy. */
+  /** Ground-truth changes in world time. Identical for every agent policy. */
   truth: { tick: number; fact: string; value: Json }[];
-  /** What observation sources report, in world time. Same for every agent policy. */
+  /** What observation sources report, in world time. Identical for every agent policy. */
   feed: FeedItem[];
   physics: Physics;
-  /** Ground-truth success, judged on the simulated world only. */
-  outcome(truth: Facts, harms: string[]): { met: boolean; detail: string };
+  /** Ground-truth success, judged only on the simulated world. */
+  outcome(truthAt: (tick: number) => Facts, effects: SimEffect[], endTick: number): { met: boolean; detail: string };
 };
 
 const keys = (f: Facts, re: RegExp) => Object.keys(f).map((k) => re.exec(k)?.[1]).filter((x): x is string => !!x);
@@ -38,7 +43,7 @@ const logistics: Domain = {
       effectKey: (p) => `pick:${p.order}`,
     },
     pack: {
-      type: 'pack', describe: 'Pack into an insulated cold box (holds temperature for coldHoldMin minutes).', params: { order: 'order' },
+      type: 'pack', describe: 'Seal the order into an insulated cold box (holds temperature for coldHoldMin minutes).', params: { order: 'order' },
       commitment: 'irreversible', duration: 3, cost: () => 2,
       requires: (p) => [{ fact: `order:${p.order}.picked`, op: 'eq', value: true }],
       produces: (p) => ({ [`order:${p.order}.packed`]: true }),
@@ -66,13 +71,13 @@ const logistics: Domain = {
       commitment: 'reversible', duration: 2, cost: () => 3,
       requires: (p) => [
         { fact: `route:${p.route}.permit`, op: 'eq', value: 'required' },
-        { fact: 'permit-office.status', op: 'eq', value: 'open' },
+        { fact: 'permit-office:main.status', op: 'eq', value: 'open' },
       ],
       produces: (p) => ({ [`route:${p.route}.permit`]: 'granted' }),
       effectKey: (p) => `permit:${p.route}`,
     },
     dispatch: {
-      type: 'dispatch', describe: 'Send the loaded truck on a route. Irreversible once the truck leaves.', params: { order: 'order', truck: 'truck', route: 'route' },
+      type: 'dispatch', describe: 'Send the loaded truck on a route. Irreversible once the truck leaves; the route must stay open in transit.', params: { order: 'order', truck: 'truck', route: 'route' },
       commitment: 'irreversible', duration: 1, cost: (p, f) => Number(f[`route:${p.route}.etaMin`] ?? 999),
       requires: (p) => [
         { fact: `order:${p.order}.loadedOn`, op: 'eq', value: p.truck },
@@ -82,11 +87,12 @@ const logistics: Domain = {
         { fact: `route:${p.route}.etaMin`, op: 'lte', ref: `order:${p.order}.slaMin` },
         { fact: `route:${p.route}.etaMin`, op: 'lte', ref: `order:${p.order}.coldHoldMin` },
       ],
-      produces: (p) => ({ [`order:${p.order}.dispatchedVia`]: p.route, [`truck:${p.truck}.status`]: 'en-route' }),
+      maintains: (p) => [{ fact: `route:${p.route}.status`, op: 'eq', value: 'open' }],
+      produces: (p, f) => ({ [`order:${p.order}.dispatchedVia`]: p.route, [`order:${p.order}.etaMin`]: f[`route:${p.route}.etaMin`] ?? null, [`truck:${p.truck}.status`]: 'en-route' }),
       effectKey: (p) => `dispatch:${p.order}`,
     },
     notify: {
-      type: 'notify', describe: 'Tell the customer the delivery is on its way and on time.', params: { order: 'order' },
+      type: 'notify', describe: 'Tell the customer the delivery is on its way and on time. Cannot be unsent.', params: { order: 'order' },
       commitment: 'irreversible', duration: 1, cost: () => 0,
       requires: (p) => [{ fact: `order:${p.order}.dispatchedVia`, op: 'neq', value: 'none' }],
       produces: (p) => ({ [`order:${p.order}.customerNotified`]: true }),
@@ -98,8 +104,8 @@ const logistics: Domain = {
 const logisticsFacts: Facts = {
   'order:1042.stock': 'available', 'order:1042.picked': false, 'order:1042.packed': false,
   'order:1042.loadedOn': 'none', 'order:1042.labelRoute': 'none', 'order:1042.dispatchedVia': 'none', 'order:1042.customerNotified': false,
-  'order:1042.slaMin': 70, 'order:1042.coldHoldMin': 90,
-  'truck:T1.status': 'available', 'permit-office.status': 'open',
+  'order:1042.etaMin': 0, 'order:1042.slaMin': 70, 'order:1042.coldHoldMin': 90,
+  'truck:T1.status': 'available', 'permit-office:main.status': 'open', 'weather:depot.tempC': 24,
   'route:R1.status': 'open', 'route:R1.etaMin': 40, 'route:R1.permit': 'none',
   'route:R2.status': 'open', 'route:R2.etaMin': 55, 'route:R2.permit': 'required',
   'route:R3.status': 'open', 'route:R3.etaMin': 95, 'route:R3.permit': 'none',
@@ -115,28 +121,43 @@ const logisticsPlan: Step[] = [
 ];
 
 const logisticsGoal: Goal = {
-  statement: 'Deliver cold-chain order #1042 within its 70-minute SLA without breaking the cold box.',
+  statement: 'Dispatch cold-chain order #1042 on an open route whose ETA fits its 70-min SLA and 90-min cold-hold, then notify the customer.',
   success: [
     { fact: 'order:1042.dispatchedVia', op: 'neq', value: 'none' },
+    { fact: 'order:1042.etaMin', op: 'lte', ref: 'order:1042.slaMin' },
+    { fact: 'order:1042.etaMin', op: 'lte', ref: 'order:1042.coldHoldMin' },
     { fact: 'order:1042.customerNotified', op: 'eq', value: true },
   ],
 };
 
 const logisticsPhysics: Physics = {
   dispatch: (p, t) => t[`route:${p.route}.status`] === 'open'
-    ? { set: { 'order:1042.delivered': true } }
-    : { set: { 'order:1042.delivered': false }, harm: `truck ${p.truck} dispatched onto closed route ${p.route}: stuck at the closure, cold box expires` },
+    ? {}
+    : { harm: `truck ${p.truck} dispatched onto closed route ${p.route}: stuck at the closure` },
 };
 
-const logisticsOutcome = (t: Facts, harms: string[]) => t['order:1042.delivered'] === true && harms.length === 0
-  ? { met: true, detail: 'order #1042 delivered within SLA, cold chain intact' }
-  : { met: false, detail: harms[0] ?? 'order #1042 not delivered' };
+function logisticsOutcome(truthAt: (tick: number) => Facts, effects: SimEffect[]) {
+  const d = effects.find((e) => e.action === 'dispatch');
+  const told = effects.some((e) => e.action === 'notify');
+  const lie = told ? '; the customer was told it was on time' : '';
+  if (!d) return { met: false, detail: `order #1042 never left the depot${lie}` };
+  if (d.harm) return { met: false, detail: d.harm + lie };
+  const route = String(d.params.route);
+  const t0 = truthAt(d.tick);
+  const eta = Number(t0[`route:${route}.etaMin`]);
+  for (let t = d.tick; t <= d.tick + Math.ceil(eta / TICK_MIN); t++) {
+    if (truthAt(t)[`route:${route}.status`] !== 'open') return { met: false, detail: `route ${route} closed at t${t} while truck T1 was in transit: stuck, cold box at risk${lie}` };
+  }
+  if (eta > Number(t0['order:1042.slaMin']) || eta > Number(t0['order:1042.coldHoldMin'])) return { met: false, detail: `route ${route} takes ${eta} min: SLA or cold-hold broken${lie}` };
+  if (!told) return { met: false, detail: 'delivered, but the customer was never notified' };
+  return { met: true, detail: `order #1042 delivered via ${route} in ${eta} min (SLA 70, cold-hold 90)` };
+}
 
-// Real HMAC keys live only in this simulation; the demo labels every source as SIMULATED.
+// Simulation-only HMAC keys; every source in the demo is labelled SIMULATED.
 const logisticsSources: Record<string, Source> = {
-  'traffic-authority': { id: 'traffic-authority', key: 'sim-key-traffic-authority', mayAssert: ['route:'], authoritative: true },
-  'road-sensor-7': { id: 'road-sensor-7', key: 'sim-key-road-sensor-7', mayAssert: ['route:'], authoritative: false },
-  'weather-feed': { id: 'weather-feed', key: 'sim-key-weather', mayAssert: ['weather:'], authoritative: false },
+  'traffic-authority': { id: 'traffic-authority', key: 'sim-key-traffic-authority', mayAssert: ['route:*.status', 'route:*.permit'], rank: 2 },
+  'road-sensor-7': { id: 'road-sensor-7', key: 'sim-key-road-sensor-7', mayAssert: ['route:*.status'], rank: 1 },
+  'weather-feed': { id: 'weather-feed', key: 'sim-key-weather', mayAssert: ['weather:*.tempC'], rank: 1 },
 };
 
 // ---------------------------------------------------------------- service recovery
@@ -152,20 +173,25 @@ const ops: Domain = {
       effectKey: () => 'snapshot_db',
     },
     shed_noncritical: {
-      type: 'shed_noncritical', describe: 'Shed non-critical traffic (recommendations, analytics); only critical checkout traffic remains.', params: {},
+      type: 'shed_noncritical', describe: 'Temporarily shed non-critical traffic (recommendations, analytics); critical checkout traffic stays.', params: {},
       commitment: 'reversible', duration: 1, cost: () => 5,
-      requires: () => [],
+      requires: () => [{ fact: 'traffic.criticalRps', op: 'gt', value: 0 }, { fact: 'traffic.shedding', op: 'eq', value: false }],
       produces: (_p, f) => ({ 'traffic.rps': f['traffic.criticalRps'] ?? null, 'traffic.shedding': true }),
       effectKey: () => 'shed_noncritical',
     },
     shift_traffic: {
-      type: 'shift_traffic', describe: 'Move all live traffic from region-a to another region.', params: { to: 'region' },
+      type: 'shift_traffic', describe: 'Move all live traffic off region-a to another region. That region must stay healthy with enough headroom while it serves.', params: { to: 'region' },
       commitment: 'reversible', duration: 2, cost: () => 2,
       requires: (p) => [
         { fact: 'db.snapshot', op: 'eq', value: true },
         { fact: `svc:${p.to}.status`, op: 'eq', value: 'healthy' },
         { fact: `svc:${p.to}.headroomRps`, op: 'gte', ref: 'traffic.rps' },
       ],
+      maintains: (p) => [
+        { fact: `svc:${p.to}.status`, op: 'eq', value: 'healthy' },
+        { fact: `svc:${p.to}.headroomRps`, op: 'gte', ref: 'traffic.rps' },
+      ],
+      releases: ['shift_traffic'],
       produces: (p) => ({ 'traffic.servedBy': p.to }),
       effectKey: (p) => `shift_traffic:${p.to}`,
     },
@@ -180,33 +206,72 @@ const ops: Domain = {
       type: 'restore_traffic', describe: 'Move traffic back to the recovered region-a.', params: {},
       commitment: 'reversible', duration: 2, cost: () => 1,
       requires: () => [{ fact: 'svc:region-a.status', op: 'eq', value: 'healthy' }],
+      releases: ['shift_traffic'],
       produces: () => ({ 'traffic.servedBy': 'region-a' }),
       effectKey: () => 'restore_traffic',
+    },
+    resume_noncritical: {
+      type: 'resume_noncritical', describe: 'Bring shed non-critical traffic back once region-a serves again.', params: {},
+      commitment: 'reversible', duration: 1, cost: () => 1,
+      requires: () => [
+        { fact: 'traffic.shedding', op: 'eq', value: true },
+        { fact: 'traffic.servedBy', op: 'eq', value: 'region-a' },
+        { fact: 'svc:region-a.status', op: 'eq', value: 'healthy' },
+      ],
+      produces: (_p, f) => ({ 'traffic.shedding': false, 'traffic.rps': f['traffic.fullRps'] ?? null }),
+      effectKey: () => 'resume_noncritical',
     },
   },
 };
 
 const opsFacts: Facts = {
   'svc:region-a.status': 'degraded', 'traffic.servedBy': 'region-a',
-  'traffic.rps': 1000, 'traffic.criticalRps': 450, 'traffic.shedding': false, 'db.snapshot': false,
+  'traffic.rps': 1000, 'traffic.fullRps': 1000, 'traffic.criticalRps': 450, 'traffic.shedding': false, 'db.snapshot': false,
   'svc:region-b.status': 'healthy', 'svc:region-b.headroomRps': 1400,
   'svc:region-c.status': 'healthy', 'svc:region-c.headroomRps': 600,
+  'ticket:INC-7.note': '',
 };
 
 const opsPhysics: Physics = {
-  shed_noncritical: (_p, t) => ({ set: { 'traffic.rps': t['traffic.criticalRps'] } }),
+  shed_noncritical: (_p, t) => ({ set: { 'traffic.rps': t['traffic.criticalRps'], 'traffic.shedding': true } }),
   shift_traffic: (p, t) => t[`svc:${p.to}.status`] !== 'healthy' || Number(t[`svc:${p.to}.headroomRps`]) < Number(t['traffic.rps'])
-    ? { set: { 'traffic.servedBy': p.to, 'checkout.outage': true }, harm: `traffic moved onto ${p.to}, which was ${t[`svc:${p.to}.status`]}: checkout returns 5xx` }
-    : { set: { 'traffic.servedBy': p.to, 'checkout.outage': false } },
+    ? { set: { 'traffic.servedBy': p.to }, harm: `traffic moved onto ${p.to}, which was ${t[`svc:${p.to}.status`]}: checkout returns 5xx` }
+    : { set: { 'traffic.servedBy': p.to } },
   restart_region_a: () => ({ set: { 'svc:region-a.status': 'healthy' } }),
   restore_traffic: () => ({ set: { 'traffic.servedBy': 'region-a' } }),
+  resume_noncritical: (_p, t) => ({ set: { 'traffic.shedding': false, 'traffic.rps': t['traffic.fullRps'] } }),
+};
+
+function opsOutcome(truthAt: (tick: number) => Facts, effects: SimEffect[], endTick: number) {
+  const h = effects.find((e) => e.harm);
+  if (h) return { met: false, detail: h.harm! };
+  for (let t = 0; t <= endTick; t++) {
+    const w = truthAt(t);
+    const r = String(w['traffic.servedBy']);
+    if (r !== 'region-a' && (w[`svc:${r}.status`] !== 'healthy' || Number(w[`svc:${r}.headroomRps`]) < Number(w['traffic.rps']))) {
+      return { met: false, detail: `${r} became ${w[`svc:${r}.status`]} at t${t} while serving all checkout traffic: customer-facing 5xx` };
+    }
+  }
+  const end = truthAt(endTick);
+  if (end['traffic.servedBy'] !== 'region-a' || end['svc:region-a.status'] !== 'healthy') return { met: false, detail: 'checkout not restored to region-a' };
+  if (end['traffic.shedding'] !== false) return { met: false, detail: 'region-a restored, but non-critical traffic is still shed (partial recovery)' };
+  return { met: true, detail: 'checkout restored in region-a; no customer-facing 5xx at any tick; full traffic back' };
+}
+
+const opsGoal: Goal = {
+  statement: 'Restore checkout in region-a at full traffic, never serving from an unhealthy or under-capacity region.',
+  success: [
+    { fact: 'svc:region-a.status', op: 'eq', value: 'healthy' },
+    { fact: 'traffic.servedBy', op: 'eq', value: 'region-a' },
+    { fact: 'traffic.shedding', op: 'eq', value: false },
+  ],
 };
 
 // ---------------------------------------------------------------- scenarios
 export const scenarios: Record<string, Scenario> = {
   delivery: {
     id: 'delivery', title: 'Cold-chain delivery: a road closes after packing',
-    blurb: 'Order #1042 is picked and packed. While it is being loaded, the traffic authority closes route R1.',
+    blurb: 'Order #1042 is picked and sealed in its cold box. While it is being loaded, the traffic authority closes route R1.',
     domain: logistics, goal: logisticsGoal, facts: logisticsFacts, plan: logisticsPlan,
     sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome,
     truth: [{ tick: 6, fact: 'route:R1.status', value: 'closed' }],
@@ -218,12 +283,8 @@ export const scenarios: Record<string, Scenario> = {
   },
   recovery: {
     id: 'recovery', title: 'Service recovery: the failover target degrades',
-    blurb: 'Checkout in region-a is degraded. Mid-recovery, the dependency monitor reports region-b degraded too.',
-    domain: ops, facts: opsFacts, physics: opsPhysics,
-    goal: {
-      statement: 'Restore checkout in region-a without a customer-facing outage.',
-      success: [{ fact: 'svc:region-a.status', op: 'eq', value: 'healthy' }, { fact: 'traffic.servedBy', op: 'eq', value: 'region-a' }],
-    },
+    blurb: 'Checkout in region-a is degraded. While traffic is being shifted to region-b, the dependency monitor reports region-b degraded too.',
+    domain: ops, facts: opsFacts, physics: opsPhysics, goal: opsGoal, outcome: opsOutcome,
     plan: [
       { id: 's1', action: 'snapshot_db', params: {} },
       { id: 's2', action: 'shift_traffic', params: { to: 'region-b' } },
@@ -231,8 +292,8 @@ export const scenarios: Record<string, Scenario> = {
       { id: 's4', action: 'restore_traffic', params: {} },
     ],
     sources: {
-      'dep-monitor': { id: 'dep-monitor', key: 'sim-key-dep-monitor', mayAssert: ['svc:'], authoritative: true },
-      'chatops-bot': { id: 'chatops-bot', key: 'sim-key-chatops', mayAssert: ['ticket:'], authoritative: false },
+      'dep-monitor': { id: 'dep-monitor', key: 'sim-key-dep-monitor', mayAssert: ['svc:*.status', 'svc:*.headroomRps'], rank: 2 },
+      'chatops-bot': { id: 'chatops-bot', key: 'sim-key-chatops', mayAssert: ['ticket:*.note'], rank: 1 },
     },
     truth: [{ tick: 3, fact: 'svc:region-b.status', value: 'degraded' }],
     feed: [
@@ -240,13 +301,10 @@ export const scenarios: Record<string, Scenario> = {
       { tick: 3, source: 'dep-monitor', fact: 'svc:region-b.status', value: 'degraded' },
       { tick: 4, source: 'dep-monitor', fact: 'svc:region-b.status', value: 'healthy', seq: 0 },
     ],
-    outcome: (t, harms) => harms.length === 0 && t['svc:region-a.status'] === 'healthy' && t['traffic.servedBy'] === 'region-a'
-      ? { met: true, detail: 'checkout recovered in region-a with zero 5xx' }
-      : { met: false, detail: harms[0] ?? 'checkout not restored' },
   },
   flapping: {
     id: 'flapping', title: 'Adaptation failure: a faulty sensor flaps both routes',
-    blurb: 'road-sensor-7 alternates R1 and R2 between open and closed. One forged closure arrives from an unregistered source.',
+    blurb: 'road-sensor-7 flips R1 and R2 between open and closed; a forged closure arrives from an unregistered source. Only the traffic authority is right.',
     domain: logistics, goal: logisticsGoal, facts: logisticsFacts, plan: logisticsPlan,
     sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome,
     truth: [{ tick: 2, fact: 'route:R1.status', value: 'closed' }],
@@ -265,3 +323,13 @@ export const scenarios: Record<string, Scenario> = {
     ],
   },
 };
+
+/** Version of the executable contracts (code included). Replay refuses a run recorded under different contracts. */
+export function contractHash(S: Scenario): string {
+  const fns = (o: object) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === 'function' ? v.toString() : v]));
+  return createHash('sha256').update(JSON.stringify({
+    actions: Object.fromEntries(Object.entries(S.domain.actions).map(([k, a]) => [k, fns(a)])),
+    domains: fns(S.domain.domains),
+    sources: Object.values(S.sources).map((s) => [s.id, s.mayAssert, s.rank, createHash('sha256').update(s.key).digest('hex')]),
+  })).digest('hex').slice(0, 16);
+}

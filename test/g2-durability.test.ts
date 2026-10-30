@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hub, Session } from '../src/runner.ts';
-import { decide, fold, reduce, INPUTS } from '../src/engine.ts';
+import { decide, fold, reduce, INPUTS, startContext } from '../src/engine.ts';
 import type { Ev, RunState } from '../src/engine.ts';
 import { runMetrics } from '../src/metrics.ts';
 
@@ -95,7 +95,7 @@ test('a run with no incoming events does no planning, however long the clock run
   const hub = new Hub();
   const s = new Session(hub, 'quiet', 'delivery', ['keel']);
   hub.store.createRun('quiet-keel', 'quiet', 'delivery', 'keel');
-  hub.submit('quiet-keel', { t: 'start', runId: 'quiet-keel', scenario: 'delivery', policy: 'keel', at: 0 }, s);
+  hub.submit('quiet-keel', { t: 'start', runId: 'quiet-keel', scenario: 'delivery', context: startContext('delivery', 'keel'), at: 0 }, s);
   s.runToEnd(200);
   const kinds = hub.store.events('quiet-keel').map((e: Ev) => e.t);
   assert.ok(!kinds.includes('repair_requested'));

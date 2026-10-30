@@ -5,7 +5,7 @@ import type { Facts, Params } from './model.ts';
 import type { Scenario } from './scenarios.ts';
 import type { Store } from './store.ts';
 
-export type ExecResult = { kind: 'receipt'; detail: string } | { kind: 'timeout' };
+export type ExecResult = { kind: 'receipt'; applied: Facts; detail: string } | { kind: 'timeout' };
 export type Faults = { dropAckOnce?: string[] }; // effect keys whose first acknowledgement is lost AFTER applying
 
 export class Sim {
@@ -31,30 +31,34 @@ export class Sim {
       .map((r) => ({ opId: r.op_id as string, action: r.action as string, params: JSON.parse(r.params as string), tick: Number(r.tick), harm: (r.harm as string) ?? null, sets: JSON.parse(r.sets as string) }));
   }
 
-  /** Apply once per opId. A repeated opId returns the original receipt; a reused opId with other arguments is refused. */
-  execute(runId: string, S: Scenario, opId: string, action: string, params: Params, effectKey: string, tick: number): ExecResult {
-    const reqHash = createHash('sha256').update(JSON.stringify([action, params])).digest('hex');
-    const existing = this.store.db.prepare('SELECT request_hash FROM sim_effects WHERE op_id = ?').get(opId) as { request_hash: string } | undefined;
+  /**
+   * Apply once per opId. A repeated opId returns the original receipt; an opId reused with other arguments is refused.
+   * The receipt reports the mutation the executor applied (the agent's request), which replay consumes verbatim.
+   */
+  execute(runId: string, S: Scenario, opId: string, action: string, params: Params, expect: Facts, effectKey: string, tick: number): ExecResult {
+    const reqHash = createHash('sha256').update(JSON.stringify([runId, action, params])).digest('hex');
+    const existing = this.store.db.prepare('SELECT request_hash, applied FROM sim_effects WHERE op_id = ?').get(opId) as { request_hash: string; applied: string } | undefined;
     if (existing) {
       if (existing.request_hash !== reqHash) throw new Error(`opId ${opId} reused with different arguments`);
-      return { kind: 'receipt', detail: 'already applied (idempotent replay of the same operation)' };
+      return { kind: 'receipt', applied: JSON.parse(existing.applied), detail: 'already applied (idempotent replay of the same operation)' };
     }
     const physics = S.physics[action]?.(params, this.truth(runId, S, tick)) ?? {};
-    this.store.db.prepare('INSERT INTO sim_effects (op_id, run_id, action, params, request_hash, tick, harm, sets) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(opId, runId, action, JSON.stringify(params), reqHash, tick, physics.harm ?? null, JSON.stringify(physics.set ?? {}));
+    this.store.db.prepare('INSERT INTO sim_effects (op_id, run_id, action, params, request_hash, tick, harm, sets, applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(opId, runId, action, JSON.stringify(params), reqHash, tick, physics.harm ?? null, JSON.stringify(physics.set ?? {}), JSON.stringify(expect));
     if (this.faults.dropAckOnce?.includes(effectKey) && !this.dropped.has(`${runId}|${effectKey}`)) {
       this.dropped.add(`${runId}|${effectKey}`);
       return { kind: 'timeout' }; // the effect happened; only the acknowledgement was lost
     }
-    return { kind: 'receipt', detail: physics.harm ? 'accepted by the simulated system' : 'applied' };
+    return { kind: 'receipt', applied: expect, detail: 'applied' };
   }
 
-  lookup(opId: string): 'yes' | 'no' {
-    return this.store.db.prepare('SELECT 1 FROM sim_effects WHERE op_id = ?').get(opId) ? 'yes' : 'no';
+  lookup(opId: string): { found: 'yes' | 'no'; applied: Facts | null } {
+    const r = this.store.db.prepare('SELECT applied FROM sim_effects WHERE op_id = ?').get(opId) as { applied: string } | undefined;
+    return r ? { found: 'yes', applied: JSON.parse(r.applied) } : { found: 'no', applied: null };
   }
 
   outcome(runId: string, S: Scenario, tick: number) {
-    const harms = this.effects(runId).map((e) => e.harm).filter((h): h is string => !!h);
-    return { ...S.outcome(this.truth(runId, S, tick), harms), harms };
+    const effects = this.effects(runId);
+    return { ...S.outcome((t) => this.truth(runId, S, t), effects, tick), harms: effects.map((e) => e.harm).filter((h): h is string => !!h) };
   }
 }

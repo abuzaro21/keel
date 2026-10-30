@@ -1,98 +1,102 @@
 // World model: the agent's beliefs, built only from verified observations and its own effect receipts.
-// Observations are untrusted input; this module decides which ones are allowed to change a belief.
+// Observations are untrusted input; this module decides which ones may change a belief.
 import { createHmac } from 'node:crypto';
 import type { Facts, Json } from './model.ts';
 
-export type Source = { id: string; key: string; mayAssert: string[]; authoritative: boolean };
+/**
+ * A registered producer. `mayAssert` uses exact `kind:*.attribute` patterns (`*` = one entity).
+ * `rank` arbitrates between sources: a lower-ranked source cannot overwrite a fact last set by a higher one.
+ */
+export type Source = { id: string; key: string; mayAssert: string[]; rank: number };
 export type Observation = { eventId: string; source: string; seq: number; fact: string; value: Json; observedAt: number; sig: string };
 
-export type FactMeta = { source: string; eventId: string; observedAt: number };
+export type FactMeta = { source: string; eventId: string; observedAt: number; rank: number };
 export type WorldState = {
   rev: number;
   facts: Facts;
   meta: Record<string, FactMeta>;
-  seen: Record<string, string>;         // eventId -> canonical content (dedupe + reuse detection)
+  seen: Record<string, string>;         // accepted eventId -> canonical content (dedupe + reuse detection)
   lastSeq: Record<string, number>;      // `${source}|${fact}` -> highest seq applied
-  changes: Record<string, number[]>;    // fact -> observedAt of recent value changes
+  changes: Record<string, number[]>;    // fact -> observedAt ticks of recent value changes
   unstable: string[];
 };
 
 export type Ingest =
-  | { kind: 'applied'; changed: boolean; prev: Json | undefined; becameUnstable: boolean; cleared: boolean }
+  | { kind: 'applied'; changed: boolean; prev: Json | undefined; becameUnstable: boolean }
   | { kind: 'duplicate' }
   | { kind: 'rejected'; reason: string }
   | { kind: 'stale'; reason: string };
 
-/** Flap rule: this many value changes of one fact within FLAP_WINDOW observed-time ticks = unstable. */
+/** Flap rule: this many value changes of one fact within FLAP_WINDOW ticks = unstable, whatever the source. */
 export const FLAP_CHANGES = 3;
 export const FLAP_WINDOW = 30;
+/** Observations must be stamped within this many ticks of the simulation clock, never in the future. */
+export const MAX_AGE = 30;
 
 export const canonical = (o: Omit<Observation, 'sig'>) =>
   [o.eventId, o.source, o.seq, o.fact, JSON.stringify(o.value), o.observedAt].join('|');
 export const sign = (o: Omit<Observation, 'sig'>, key: string) => createHmac('sha256', key).update(canonical(o)).digest('hex');
+export const permits = (pattern: string, fact: string) =>
+  new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[\\w-]+')}$`).test(fact);
 
 export function initialWorld(facts: Facts): WorldState {
   const meta: Record<string, FactMeta> = {};
-  for (const k of Object.keys(facts)) meta[k] = { source: 'scenario', eventId: 'initial', observedAt: 0 };
+  for (const k of Object.keys(facts)) meta[k] = { source: 'initial', eventId: 'initial', observedAt: 0, rank: 0 };
   return { rev: 0, facts: { ...facts }, meta, seen: {}, lastSeq: {}, changes: {}, unstable: [] };
 }
 
-/** Pure check: what would ingesting `o` do? `apply` performs it. Split so the engine can record the verdict first. */
-export function judge(w: WorldState, o: Observation, sources: Record<string, Source>): Ingest {
+/** Pure verdict: what would ingesting `o` at clock `now` do? `apply` performs it. */
+export function judge(w: WorldState, o: Observation, sources: Record<string, Source>, now: number): Ingest {
+  const src = Object.hasOwn(sources, o.source) ? sources[o.source] : undefined;
+  if (!src) return { kind: 'rejected', reason: `unknown source "${o.source}"` };
+  if (typeof o.sig !== 'string' || o.sig !== sign(o, src.key)) return { kind: 'rejected', reason: `signature does not verify for ${o.source}` };
+  if (!src.mayAssert.some((p) => permits(p, o.fact))) return { kind: 'rejected', reason: `${o.source} may not assert ${o.fact}` };
+  if (!Number.isInteger(o.observedAt) || o.observedAt > now || now - o.observedAt > MAX_AGE) return { kind: 'rejected', reason: `timestamp t${o.observedAt} outside the accepted window at t${now}` };
+  if (!Object.hasOwn(w.facts, o.fact)) return { kind: 'rejected', reason: `${o.fact} is not a known fact` };
+  if (typeof o.value !== typeof w.facts[o.fact]) return { kind: 'rejected', reason: `${o.fact} must be a ${typeof w.facts[o.fact]}` };
+  // Only authenticated, permitted events reach dedupe, so a forgery cannot reserve a genuine event's id.
   const prior = w.seen[o.eventId];
   if (prior !== undefined) return prior === canonical(o) ? { kind: 'duplicate' } : { kind: 'rejected', reason: `event id ${o.eventId} reused with different content` };
-  const src = sources[o.source];
-  if (!src) return { kind: 'rejected', reason: `unknown source "${o.source}"` };
-  if (o.sig !== sign(o, src.key)) return { kind: 'rejected', reason: `signature does not verify for ${o.source}` };
-  if (!src.mayAssert.some((p) => o.fact.startsWith(p))) return { kind: 'rejected', reason: `${o.source} may not assert ${o.fact}` };
   const lane = `${o.source}|${o.fact}`;
   if ((w.lastSeq[lane] ?? -1) >= o.seq) return { kind: 'stale', reason: `seq ${o.seq} ≤ last applied ${w.lastSeq[lane]} from ${o.source}` };
   const m = w.meta[o.fact];
-  if (m && o.observedAt < m.observedAt) return { kind: 'stale', reason: `observed at t${o.observedAt}, current belief is from t${m.observedAt}` };
   const prev = w.facts[o.fact];
+  if (m && m.rank > src.rank && prev !== o.value) return { kind: 'stale', reason: `outranked: ${m.source} set ${o.fact} = ${JSON.stringify(prev)}` };
   const changed = prev !== o.value;
-  const recent = changed ? [...(w.changes[o.fact] ?? []), o.observedAt].filter((t) => o.observedAt - t < FLAP_WINDOW) : (w.changes[o.fact] ?? []);
-  const wasUnstable = w.unstable.includes(o.fact);
-  // ponytail: an authoritative source resets the flap history and is trusted outright; a flapping authority is out of scope.
-  const cleared = src.authoritative && wasUnstable;
-  const becameUnstable = !src.authoritative && !wasUnstable && recent.length >= FLAP_CHANGES;
-  return { kind: 'applied', changed, prev, becameUnstable, cleared };
+  const recent = [...(w.changes[o.fact] ?? []), ...(changed ? [o.observedAt] : [])].filter((t) => o.observedAt - t < FLAP_WINDOW);
+  const becameUnstable = changed && !w.unstable.includes(o.fact) && recent.length >= FLAP_CHANGES;
+  return { kind: 'applied', changed, prev, becameUnstable };
 }
 
 export function apply(w: WorldState, o: Observation, v: Extract<Ingest, { kind: 'applied' }>, sources: Record<string, Source>): WorldState {
   const src = sources[o.source];
-  const changes = { ...w.changes };
-  if (src.authoritative) changes[o.fact] = [o.observedAt];
-  else if (v.changed) changes[o.fact] = [...(changes[o.fact] ?? []), o.observedAt].filter((t) => o.observedAt - t < FLAP_WINDOW);
-  let unstable = w.unstable;
-  if (v.cleared) unstable = unstable.filter((k) => k !== o.fact);
-  if (v.becameUnstable) unstable = [...unstable, o.fact];
+  const changes = v.changed ? { ...w.changes, [o.fact]: [...(w.changes[o.fact] ?? []), o.observedAt].filter((t) => o.observedAt - t < FLAP_WINDOW) } : w.changes;
   return {
-    rev: w.rev + (v.changed || v.cleared || v.becameUnstable ? 1 : 0),
+    rev: w.rev + (v.changed || v.becameUnstable ? 1 : 0),
     facts: { ...w.facts, [o.fact]: o.value },
-    meta: { ...w.meta, [o.fact]: { source: o.source, eventId: o.eventId, observedAt: o.observedAt } },
+    meta: { ...w.meta, [o.fact]: { source: o.source, eventId: o.eventId, observedAt: o.observedAt, rank: src.rank } },
     seen: { ...w.seen, [o.eventId]: canonical(o) },
     lastSeq: { ...w.lastSeq, [`${o.source}|${o.fact}`]: o.seq },
     changes,
-    unstable,
+    unstable: v.becameUnstable ? [...w.unstable, o.fact] : w.unstable,
   };
 }
 
-/** Effect receipts are the agent's own evidence: they update beliefs without any source check. */
+/** Effect receipts are the agent's own evidence: they apply the mutation the executor confirmed. */
 export function applyReceipt(w: WorldState, facts: Facts, opId: string, at: number): WorldState {
   const meta = { ...w.meta };
-  for (const k of Object.keys(facts)) meta[k] = { source: 'receipt', eventId: opId, observedAt: at };
+  for (const k of Object.keys(facts)) meta[k] = { source: 'receipt', eventId: opId, observedAt: at, rank: 0 };
   return { ...w, rev: w.rev + 1, facts: { ...w.facts, ...facts }, meta };
 }
 
-/** Operator override of an unstable fact (human confirms the value). */
-export function confirm(w: WorldState, fact: string, value: Json, at: number): WorldState {
+/** Operator confirms the value of an unstable fact (the only way instability clears), at the top source rank. */
+export function confirm(w: WorldState, fact: string, value: Json, at: number, rank: number): WorldState {
   return {
     ...w,
     rev: w.rev + 1,
     facts: { ...w.facts, [fact]: value },
-    meta: { ...w.meta, [fact]: { source: 'operator', eventId: `confirm@${at}`, observedAt: at } },
-    changes: { ...w.changes, [fact]: [at] },
+    meta: { ...w.meta, [fact]: { source: 'operator', eventId: `confirm@${at}`, observedAt: at, rank } },
+    changes: { ...w.changes, [fact]: [] },
     unstable: w.unstable.filter((k) => k !== fact),
   };
 }

@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Hub, Session, feedObservations } from '../src/runner.ts';
-import { decide, fold, reduce } from '../src/engine.ts';
+import { decide, fold, reduce, startContext } from '../src/engine.ts';
 import type { Ev, RunState } from '../src/engine.ts';
 import { runMetrics } from '../src/metrics.ts';
 import { scenarios } from '../src/scenarios.ts';
@@ -17,7 +17,7 @@ const authority = (eventId: string, fact: string, value: string, at: number, seq
   const body = { eventId, source, seq, fact, value, observedAt: at };
   return { ...body, sig: sign(body, D.sources[source].key) };
 };
-const session = (scenario: string, policies: ('keel' | 'static' | 'naive')[]) => {
+const session = (scenario: string, policies: ('keel' | 'static' | 'naive' | 'guarded')[]) => {
   const hub = new Hub();
   const s = new Session(hub, scenario, scenario, policies).start().runToEnd();
   const m = Object.fromEntries(s.runIds.map((r, i) => [policies[i], runMetrics(hub.store, hub.sim, r)]));
@@ -54,7 +54,7 @@ test('Scenario B: the dependency signal fences the in-flight failover before its
   assert.ok(!hub.sim.effects('recovery-keel').some((e) => e.params.to === 'region-b'), 'region-b never received traffic');
   const rev = ev('keel').find((e) => e.t === 'revision');
   assert.ok(rev && rev.t === 'revision');
-  assert.deepEqual(rev.record.added, ['shed_noncritical()', 'shift_traffic(to=region-c)']);
+  assert.deepEqual(rev.record.added, ['shed_noncritical()', 'shift_traffic(to=region-c)', 'resume_noncritical()']);
 });
 
 test('undisturbed controls: with no world change, static and KEEL both succeed and nobody revises', () => {
@@ -77,20 +77,27 @@ test('fairness: every policy in a session receives byte-identical observations a
   assert.equal(feedObservations(scenarios.flapping).length, JSON.parse(seen[0]).length);
 });
 
-test('adaptation failure: naive flips with the faulty sensor and hits the closed road; KEEL holds, then resumes on authority', () => {
-  const { m, ev } = session('flapping', ['naive', 'keel']);
+test('adaptation failure: naive flips with the faulty sensor and hits the closed road; KEEL holds until an operator confirms', () => {
+  const { m, ev, hub, s } = session('flapping', ['naive', 'keel']);
   assert.equal(m.naive.goalMet, false);
   assert.ok(m.naive.revisions >= 2);
-  assert.ok(m.naive.wastedEffects >= 1, 'naive executed work it later abandoned');
-  assert.equal(m.keel.goalMet, true);
+  assert.match(m.naive.truth, /closed route R1.*told it was on time/, 'naive followed the sensor back onto the closed road and told the customer it was on time');
+  assert.equal(m.keel.status, 'paused', 'latched: the authority alone does not lift containment');
   assert.equal(m.keel.invalidActions, 0);
-  const k = ev('keel');
+  hub.submit('flapping-keel', { t: 'operator', cmd: 'confirm', fact: 'route:R2.status', value: 'open', at: s.tick }, s);
+  hub.submit('flapping-keel', { t: 'operator', cmd: 'resume', at: s.tick }, s);
+  s.runToEnd();
+  const m2 = runMetrics(hub.store, hub.sim, 'flapping-keel');
+  assert.equal(m2.goalMet, true, m2.truth);
+  assert.equal(m2.invalidActions, 0);
+  const k = hub.store.events('flapping-keel');
+  void ev;
   const paused = k.find((e) => e.t === 'paused');
   assert.ok(paused && paused.t === 'paused' && paused.kind === 'unstable');
-  const resumed = k.findIndex((e) => e.t === 'resumed');
+  const resumed = k.findIndex((e) => e.t === 'resumed' && e.by === 'operator');
   const firstDispatchAfterPause = k.findIndex((e, i) => i > k.indexOf(paused!) && e.t === 'dispatch');
-  assert.ok(resumed > 0 && firstDispatchAfterPause > resumed, 'nothing ran between the pause and the authoritative confirmation');
-  assert.equal(m.keel.rejectedObservations, 1, 'forged press-office closure rejected');
+  assert.ok(resumed > 0 && firstDispatchAfterPause > resumed, 'nothing ran between the pause and the operator resume');
+  assert.equal(m2.rejectedObservations, 1, 'forged press-office closure rejected');
 });
 
 test('stale candidate: a world change between repair request and planner answer is never committed', () => {
@@ -100,15 +107,15 @@ test('stale candidate: a world change between repair request and planner answer 
   const log: Ev[] = [];
   let st: RunState | null = null;
   const feed = (e: Ev) => { const d = decide(st, e); for (const x of [e, ...d]) { st = reduce(st, x); log.push(x); } return d; };
-  feed({ t: 'start', runId: 'stale-keel', scenario: 'delivery', policy: 'keel', at: 0 });
-  for (const step of ['pick', 'pack', 'load']) {
+  feed({ t: 'start', runId: 'stale-keel', scenario: 'delivery', context: startContext('delivery', 'keel'), at: 0 });
+  const land = (at: number) => {
     const op: string = st!.inflight!;
-    assert.equal(st!.ledger[op].action, step);
-    feed({ t: 'effect_ready', opId: op, at: 1 });
-    if (step === 'load') break;
-    feed({ t: 'receipt', opId: op, at: 1, detail: 'ok' });
-  }
-  feed({ t: 'receipt', opId: st!.inflight!, at: 2, detail: 'ok' });
+    const gen = st!.ledger[op].gen;
+    const c = feed({ t: 'effect_ready', opId: op, gen, at }).find((e) => e.t === 'commit_effect');
+    assert.ok(c && c.t === 'commit_effect');
+    return feed({ t: 'receipt', opId: op, gen, applied: c.expect, at, detail: 'ok' });
+  };
+  land(1); land(2); land(2);
   const d1 = feed({ t: 'observation', obs: authority('c1', 'route:R1.status', 'closed', 3, 1), at: 3 });
   const req = d1.find((e) => e.t === 'repair_requested');
   assert.ok(req && req.t === 'repair_requested');
@@ -147,9 +154,9 @@ test('untrusted model candidates: unknown actions, phantom entities, repeated ef
 
 test('no feasible repair: KEEL pauses with the goal intact instead of inventing a plan', () => {
   const id = variant('no-route', D, {
-    sources: { ...D.sources, 'permit-office': { id: 'permit-office', key: 'sim-key-permit', mayAssert: ['permit-office.'], authoritative: true } },
+    sources: { ...D.sources, 'permit-office': { id: 'permit-office', key: 'sim-key-permit', mayAssert: ['permit-office:*.status'], rank: 2 } },
     truth: [{ tick: 6, fact: 'route:R1.status', value: 'closed' }],
-    feed: [{ tick: 4, source: 'permit-office', fact: 'permit-office.status', value: 'closed' }, { tick: 6, source: 'traffic-authority', fact: 'route:R1.status', value: 'closed' }],
+    feed: [{ tick: 4, source: 'permit-office', fact: 'permit-office:main.status', value: 'closed' }, { tick: 6, source: 'traffic-authority', fact: 'route:R1.status', value: 'closed' }],
   });
   const { m, ev } = session(id, ['static', 'keel']);
   assert.equal(m.static.goalMet, false);
@@ -163,6 +170,7 @@ test('no feasible repair: KEEL pauses with the goal intact instead of inventing 
 test('revision budget: after 3 committed revisions a 4th valid repair waits for an operator', () => {
   const id = variant('budget', D, {
     facts: { ...D.facts, 'route:R3.etaMin': 60, 'route:R4.status': 'open', 'route:R4.etaMin': 65, 'route:R4.permit': 'none' },
+    sources: D.sources,
     feed: [
       { tick: 1, source: 'traffic-authority', fact: 'route:R1.status', value: 'closed' },
       { tick: 3, source: 'traffic-authority', fact: 'route:R3.status', value: 'closed' },
@@ -205,10 +213,36 @@ test('a closure during the dispatch preparation window is fenced before the truc
   assert.equal(m.static.goalMet, false);
 });
 
-test('completed irreversible work is never undone or repeated', () => {
+test('closure while the truck is in transit: an irreversible step cannot be undone, so KEEL stops instead of lying', () => {
   const id = variant('late-closure', D, { truth: [{ tick: 10, fact: 'route:R1.status', value: 'closed' }], feed: [{ tick: 10, source: 'traffic-authority', fact: 'route:R1.status', value: 'closed' }] });
-  const { m, ev } = session(id, ['keel']);
-  assert.equal(m.keel.revisions, 0, 'the truck already left on R1; nothing remaining depends on R1');
+  const { m, hub } = session(id, ['static', 'keel']);
+  assert.equal(m.static.goalMet, false);
+  assert.match(m.static.truth, /told it was on time/, 'static sends a false on-time notice');
+  assert.equal(m.keel.goalMet, false, 'not every changed situation is recoverable');
+  assert.equal(m.keel.status, 'paused');
+  assert.equal(m.keel.revisions, 0);
   assert.equal(m.keel.duplicateEffects, 0);
-  assert.ok(ev('keel').some((e) => e.t === 'assessed' && e.result === 'no_impact' && e.fact === 'route:R1.status'));
+  assert.ok(!hub.sim.effects(`${id}-keel`).some((e) => e.action === 'notify'), 'KEEL did not tell the customer it was on time');
+  assert.ok(hub.sim.effects(`${id}-keel`).filter((e) => e.action === 'dispatch').length === 1, 'and did not re-dispatch');
+});
+
+test('maintained commitment: region-b degrades AFTER traffic moved there; KEEL fences the restart and moves traffic again', () => {
+  const R = scenarios.recovery;
+  const id = variant('late-degrade', R, { truth: [{ tick: 5, fact: 'svc:region-b.status', value: 'degraded' }], feed: [{ tick: 5, source: 'dep-monitor', fact: 'svc:region-b.status', value: 'degraded' }] });
+  const { m, ev } = session(id, ['static', 'keel']);
+  assert.equal(m.static.goalMet, false, m.static.truth);
+  assert.equal(m.keel.fenced, 1, 'restart_region_a was preparing and is cancelled');
+  const rev = ev('keel').find((e) => e.t === 'revision');
+  assert.ok(rev && rev.t === 'revision');
+  assert.match(rev.record.because, /shift_traffic\(to=region-b\) committed to svc:region-b.status eq "healthy"/);
+  assert.deepEqual(rev.record.completed, ['s1', 's2']);
+  assert.ok(rev.record.added.includes('shift_traffic(to=region-c)'));
+});
+
+test('guarded-static control: checking assumptions without repair stops safely but misses the goal', () => {
+  const { m } = session('delivery', ['guarded', 'keel']);
+  assert.equal(m.guarded.invalidActions, 0);
+  assert.equal(m.guarded.goalMet, false);
+  assert.equal(m.guarded.status, 'paused');
+  assert.equal(m.keel.goalMet, true);
 });

@@ -5,7 +5,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { contract, stepSig } from './model.ts';
 import { flawRepairs, fullReplan } from './repair.ts';
 import type { Candidate, Draft } from './repair.ts';
-import { remainingOf, policies } from './engine.ts';
+import { ctxOf, remainingOf } from './engine.ts';
 import type { RunState } from './engine.ts';
 import { scenarios } from './scenarios.ts';
 
@@ -21,11 +21,12 @@ export function planningContext(s: RunState) {
   const S = scenarios[s.scenario];
   const D = S.domain;
   return {
-    goal: S.goal,
+    goal: s.goal,
     catalog: Object.values(D.actions).map((a) => ({ action: a.type, params: a.params, describe: a.describe, commitment: a.commitment })),
     entities: Object.fromEntries(Object.entries(D.domains).map(([k, fn]) => [k, fn(s.world.facts)])),
     beliefs: Object.fromEntries(Object.entries(s.world.facts).sort(([a], [b]) => a.localeCompare(b))),
     unstableFacts: [...s.world.unstable].sort(),
+    liveCommitments: ctxOf(s).active.map((o) => `${o.from} keeps ${o.cond.fact} ${o.cond.op} ${o.cond.ref ?? JSON.stringify(o.cond.value)}`),
     completed: s.plan.steps.filter((x) => s.done.includes(contract(D, x.action).effectKey(x.params))).map(stepSig),
     remainingPlan: remainingOf(s).map(stepSig),
     brokenAssumptions: s.lastContradiction?.failures.map((f) => `${f.sig} needs ${f.cond} (now ${f.truth === 'unknown' ? 'UNKNOWN' : JSON.stringify(f.actual)})`) ?? [],
@@ -74,15 +75,16 @@ export class Planner {
   /** Synchronous candidates (no network). Live inference, when enabled, is added by the runner. */
   propose(s: RunState): Candidate[] {
     const S = scenarios[s.scenario];
-    const unstable = new Set(policies[s.policy].stabilityGate ? s.world.unstable : []);
-    const done = new Set(s.done);
+    const c = ctxOf(s);
     const remaining = remainingOf(s);
-    if (s.policy === 'naive') {
+    if (s.cfg.reviseOnAnyChange) {
       // Naive adaptive: replans from scratch for the cheapest plan on every change.
-      return [...fullReplan(S.domain, S.goal, s.world.facts, done, unstable), ...flawRepairs(S.domain, S.goal, remaining, s.world.facts, done, unstable)];
+      return [...fullReplan(S.domain, s.goal, c), ...flawRepairs(S.domain, s.goal, remaining, c)];
     }
-    const local = flawRepairs(S.domain, S.goal, remaining, s.world.facts, done, unstable);
-    const search = local.length ? local : fullReplan(S.domain, S.goal, s.world.facts, done, unstable);
+    const lc = s.lastContradiction;
+    const preserve = (lc?.preserved ?? []).flatMap((id) => remaining.filter((x) => x.id === id && !(lc?.affected ?? []).includes(id)).map(stepSig));
+    const local = flawRepairs(S.domain, s.goal, remaining, c, preserve);
+    const search = local.length ? local : fullReplan(S.domain, s.goal, c);
     return [...this.recorded(s), ...search];
   }
 }

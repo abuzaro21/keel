@@ -22,7 +22,7 @@ export class Store {
         tick INTEGER NOT NULL, wall REAL NOT NULL, body TEXT NOT NULL, PRIMARY KEY (run_id, n));
       CREATE TABLE IF NOT EXISTS sim_effects (
         op_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, action TEXT NOT NULL, params TEXT NOT NULL,
-        request_hash TEXT NOT NULL, tick INTEGER NOT NULL, harm TEXT, sets TEXT NOT NULL);
+        request_hash TEXT NOT NULL, tick INTEGER NOT NULL, harm TEXT, sets TEXT NOT NULL, applied TEXT NOT NULL);
     `);
   }
 

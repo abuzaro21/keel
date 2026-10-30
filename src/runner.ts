@@ -1,7 +1,7 @@
 // Imperative shell around the pure engine: persists [input, ...decisions], performs the I/O decisions ask for,
 // and runs the SIMULATED world clock. The clock schedules world events and effect completions; it never
 // asks the agent to re-think — the agent only reacts to the inputs those produce.
-import { decide, reduce, fold, policies } from './engine.ts';
+import { decide, reduce, fold, policies, startContext } from './engine.ts';
 import type { Ev, PolicyName, RunState } from './engine.ts';
 import { scenarios } from './scenarios.ts';
 import type { FeedItem, Scenario } from './scenarios.ts';
@@ -76,20 +76,23 @@ export class Hub {
     const at = session.tick;
     switch (d.t) {
       case 'dispatch':
-        session.schedule(at + d.duration, 1, runId, () => this.submit(runId, { t: 'effect_ready', opId: d.opId, at: session.tick }, session));
+        session.schedule(at + d.duration, 1, runId, () => this.submit(runId, { t: 'effect_ready', opId: d.opId, gen: d.gen, at: session.tick }, session));
         break;
       case 'commit_effect': {
         const row = s.ledger[d.opId];
         const die = (point: string) => { if (this.failpoint === point && (!this.failEffect || this.failEffect === row.effectKey)) process.kill(process.pid, 'SIGKILL'); };
         die('before_effect');
-        const r = this.sim.execute(runId, scenarios[s.scenario], row.opId, row.action, row.params, row.effectKey, at);
+        // No await between the engine's final fence check (commit_effect) and the effect: nothing can interleave.
+        const r = this.sim.execute(runId, scenarios[s.scenario], row.opId, row.action, row.params, d.expect, row.effectKey, at);
         die('after_effect');
-        q.push(r.kind === 'receipt' ? { t: 'receipt', opId: row.opId, at, detail: r.detail } : { t: 'effect_uncertain', opId: row.opId, at });
+        q.push(r.kind === 'receipt' ? { t: 'receipt', opId: row.opId, gen: d.gen, applied: r.applied, at, detail: r.detail } : { t: 'effect_uncertain', opId: row.opId, gen: d.gen, at });
         break;
       }
-      case 'reconcile_requested':
-        q.push({ t: 'reconciled', opId: d.opId, found: this.sim.lookup(d.opId), at });
+      case 'reconcile_requested': {
+        const l = this.sim.lookup(d.opId);
+        q.push({ t: 'reconciled', opId: d.opId, gen: d.gen, found: l.found, applied: l.applied, at });
         break;
+      }
       case 'repair_requested':
         q.push({ t: 'planner_output', requestId: d.requestId, candidates: this.planner.propose(s), at });
         break;
@@ -132,7 +135,7 @@ export class Session {
     this.policyNames.forEach((p, i) => {
       const runId = this.runIds[i];
       this.hub.store.createRun(runId, this.id, this.scenario, p);
-      this.hub.submit(runId, { t: 'start', runId, scenario: this.scenario, policy: p, at: 0 }, this);
+      this.hub.submit(runId, { t: 'start', runId, scenario: this.scenario, context: startContext(this.scenario, p), at: 0 }, this);
     });
     for (const { tick, obs } of feedObservations(S)) {
       for (const runId of this.runIds) this.schedule(tick, 0, null, () => this.inject(runId, obs));
