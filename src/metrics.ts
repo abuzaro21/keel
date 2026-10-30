@@ -38,7 +38,8 @@ export function runMetrics(store: Store, sim: Sim, runId: string): RunMetrics {
   const fenced = evs.filter((e) => e.t === 'fenced' && !e.reason.startsWith('process restarted')).length;
   const completed = evs.find((e) => e.t === 'completed');
   const status = [...evs].reverse().find((e) => ['completed', 'paused', 'resumed', 'stopped'].includes(e.t));
-  const obsRow = new Map(rows.filter((r) => r.ev.t === 'observation').map((r) => [(r.ev as { obs: { eventId: string } }).obs.eventId, r]));
+  const obsRow = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) if (r.ev.t === 'observation' && !obsRow.has(r.ev.obs.eventId)) obsRow.set(r.ev.obs.eventId, r); // first delivery, not a duplicate
   const latency = rows.flatMap((r) => {
     if (r.ev.t !== 'contradiction' || !r.ev.trigger) return [];
     const o = obsRow.get(r.ev.trigger.eventId);

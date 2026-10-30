@@ -75,7 +75,7 @@ export type Ev =
 export const INPUTS = new Set(['start', 'observation', 'effect_ready', 'receipt', 'effect_uncertain', 'reconciled', 'planner_output', 'operator', 'recover']);
 
 export type LedgerState = 'prepared' | 'committing' | 'done' | 'uncertain' | 'not_applied' | 'cancelled';
-export type LedgerRow = { opId: string; gen: number; stepId: string; action: string; params: Params; effectKey: string; commitment: string; planVersion: number; state: LedgerState; expect: Facts | null };
+export type LedgerRow = { opId: string; gen: number; stepId: string; action: string; params: Params; effectKey: string; commitment: string; planVersion: number; state: LedgerState; expect: Facts | null; startedAt: number };
 export type RunState = {
   runId: string; scenario: string; policy: PolicyName; cfg: Policy; goal: Goal;
   status: 'running' | 'repairing' | 'paused' | 'completed' | 'stopped';
@@ -133,7 +133,7 @@ export function reduce(s: RunState | null, e: Ev): RunState {
       }
       return n;
     case 'dispatch':
-      n.ledger = { ...s.ledger, [e.opId]: { opId: e.opId, gen: e.gen, stepId: e.stepId, action: e.action, params: e.params, effectKey: e.effectKey, commitment: e.commitment, planVersion: e.planVersion, state: 'prepared', expect: null } };
+      n.ledger = { ...s.ledger, [e.opId]: { opId: e.opId, gen: e.gen, stepId: e.stepId, action: e.action, params: e.params, effectKey: e.effectKey, commitment: e.commitment, planVersion: e.planVersion, state: 'prepared', expect: null, startedAt: n.tick } };
       n.inflight = e.opId;
       return n;
     case 'fenced': if (sameGen) { setRow({ state: 'cancelled' }); n.inflight = null; } return n;

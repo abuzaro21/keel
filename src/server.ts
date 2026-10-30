@@ -9,7 +9,7 @@ import type { Row } from './store.ts';
 import { scenarios } from './scenarios.ts';
 import { policies, remainingOf } from './engine.ts';
 import type { PolicyName, RunState } from './engine.ts';
-import { contract, stepSig } from './model.ts';
+import { contract, evalCond, stepSig } from './model.ts';
 import { runMetrics } from './metrics.ts';
 import { sign } from './world.ts';
 import type { Json } from './model.ts';
@@ -38,14 +38,22 @@ const injectable: Record<string, { source: string; fact: string; values: Json[] 
 export function stepView(s: RunState) {
   const D = scenarios[s.scenario].domain;
   const byKey = new Map(Object.values(s.ledger).map((r) => [r.effectKey, r]));
-  const remaining = new Set(remainingOf(s).map((x) => x.id));
+  const unstable = new Set(s.cfg.stabilityGate ? s.world.unstable : []);
+  // Chips are judged where each step would run: beliefs plus the expected effects of earlier pending steps.
+  // An assumption a later step will establish is not a contradiction.
+  const projected = { ...s.world.facts };
   return s.plan.steps.map((x) => {
     const a = contract(D, x.action);
     const row = byKey.get(a.effectKey(x.params));
-    const state = s.done.includes(a.effectKey(x.params)) ? 'done' : row && row.opId === s.inflight ? row.state : remaining.has(x.id) ? 'pending' : 'pending';
+    const isDone = s.done.includes(a.effectKey(x.params));
+    const state = isDone ? 'done' : row && row.opId === s.inflight ? row.state : 'pending';
+    const at = { ...projected };
+    if (!isDone) Object.assign(projected, a.produces(x.params, projected));
+    const cond = (c: Parameters<typeof evalCond>[0], kind: 'requires' | 'maintains') => ({ kind, text: `${c.fact} ${c.op} ${c.ref ?? JSON.stringify(c.value)}`, fact: c.fact, truth: evalCond(c, kind === 'maintains' ? projected : at, unstable) });
     return {
-      id: x.id, sig: stepSig(x), action: x.action, params: x.params, describe: a.describe, commitment: a.commitment, state,
-      assumptions: a.requires(x.params).map((c) => ({ text: `${c.fact} ${c.op} ${c.ref ?? JSON.stringify(c.value)}`, fact: c.fact, ref: c.ref ?? null })),
+      id: x.id, sig: stepSig(x), action: x.action, params: x.params, describe: a.describe, commitment: a.commitment, duration: a.duration, state,
+      startedAt: row && row.opId === s.inflight ? row.startedAt ?? null : null,
+      assumptions: [...a.requires(x.params).map((c) => cond(c, 'requires')), ...(a.maintains?.(x.params) ?? []).map((c) => cond(c, 'maintains'))],
     };
   });
 }
@@ -54,7 +62,8 @@ export function runView(hub: Hub, runId: string) {
   const s = hub.state(runId)!;
   return {
     runId, policy: s.policy, policyLabel: policies[s.policy].label, status: s.status, pause: s.pause, tick: s.tick,
-    plan: { version: s.plan.version, steps: stepView(s) }, revisions: s.revisions, budget: s.budget,
+    plan: { version: s.plan.version, steps: stepView(s) }, history: s.plans.map((p) => ({ version: p.version, steps: p.steps.map((x) => ({ id: x.id, sig: stepSig(x) })) })),
+    revisions: s.revisions, budget: s.budget, goal: s.goal,
     facts: s.world.facts, unstable: s.world.unstable, worldRev: s.world.rev,
     metrics: runMetrics(hub.store, hub.sim, runId),
   };
