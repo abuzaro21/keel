@@ -162,7 +162,7 @@ export class Session {
   inject(runId: string, obs: Observation) { this.hub.submit(runId, { t: 'observation', obs, at: this.tick }, this); }
   injectAll(obs: Observation) { for (const r of this.runIds) this.inject(r, obs); }
 
-  private runDue() {
+  runDue() {
     while (this.queue.length && this.queue[0].tick <= this.tick) this.queue.shift()!.fn();
   }
 

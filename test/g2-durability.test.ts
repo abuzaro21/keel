@@ -42,7 +42,7 @@ test('in-process crash at every point of the delivery run: no duplicate effects,
   for (let crashAt = 2; crashAt < total; crashAt++) {
     const hub = new Hub();
     const s = new Session(hub, 'delivery', 'delivery', ['keel']).start();
-    while (s.tick < 40 && hub.store.head('delivery-keel') < crashAt) { (s as unknown as { runDue(): void }).runDue(); s.tick++; }
+    while (s.tick < 40 && hub.store.head('delivery-keel') < crashAt) { s.runDue(); s.tick++; }
     hub.crashAndRecover('delivery-keel', s);
     s.runToEnd();
     const m = runMetrics(hub.store, hub.sim, 'delivery-keel');

@@ -162,6 +162,7 @@ export function reduce(s: RunState | null, e: Ev): RunState {
     case 'resumed':
       n.status = 'running'; n.pause = null;
       if (s.pause?.kind === 'budget' && n.budget !== null) n.budget += 1; // operator grants one more revision
+      if (s.pause?.kind === 'oscillation') n.abandoned = [];             // operator accepts returning to an earlier plan
       return n;
     case 'completed': n.status = 'completed'; return n;
     case 'stopped': n.status = 'stopped'; n.pending = null; return n;
@@ -198,7 +199,9 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
   const evaluate = (trigger: TriggerView | null, changedFact: string | null, attempt = 1) => {
     const remaining = remainingOf(s);
     const done = new Set(s.done);
-    if (changedFact && !P.reviseOnAnyChange && !referencedFacts(D, S.goal, remaining, done).has(changedFact)) {
+    // While paused on a broken plan, any accepted change may open a repair path, so it is never "no impact".
+    const pausedBroken = s.status === 'paused' && (s.pause?.kind === 'no_repair' || s.pause?.kind === 'unstable');
+    if (changedFact && !P.reviseOnAnyChange && !pausedBroken && !referencedFacts(D, S.goal, remaining, done).has(changedFact)) {
       emit({ t: 'assessed', fact: changedFact, result: 'no_impact', detail: `no remaining step or goal condition reads ${changedFact}` });
       return;
     }

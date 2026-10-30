@@ -15,7 +15,7 @@ export type RunMetrics = {
   revisions: number;
   preservedCompleted: number;        // completed steps carried unchanged into the latest revision
   duplicateEffects: number;          // same semantic effect applied more than once
-  wastedEffects: number;             // applied effects that no longer belong to the final plan
+  wastedEffects: number;             // applied effects later redone with different arguments (work thrown away)
   editDistance: number;              // sum over committed revisions
   rejectedObservations: number; staleObservations: number; duplicateObservations: number;
   latency: { eventId: string; detectMs: number; commitMs: number | null; detectTicks: number; commitTicks: number | null }[];
@@ -32,8 +32,6 @@ export function runMetrics(store: Store, sim: Sim, runId: string): RunMetrics {
   const out = sim.outcome(runId, S, lastTick);
   const effects = sim.effects(runId);
   const keys = effects.map((e) => contract(S.domain, e.action).effectKey(e.params));
-  const finalPlan = revs.length ? revs.at(-1)!.after : S.plan;
-  const finalKeys = new Set(finalPlan.map((x) => contract(S.domain, x.action).effectKey(x.params)));
   const executedSteps = new Set(evs.flatMap((e) => (e.t === 'dispatch' ? [e.stepId] : [])));
   const caught = new Set(evs.flatMap((e) => (e.t === 'contradiction' ? e.failures.filter((f) => f.truth === 'false' || f.truth === 'unknown').map((f) => f.stepId) : [])));
   const fenced = evs.filter((e) => e.t === 'fenced' && !e.reason.startsWith('process restarted')).length;
@@ -61,7 +59,7 @@ export function runMetrics(store: Store, sim: Sim, runId: string): RunMetrics {
     revisions: revs.length,
     preservedCompleted: revs.length ? revs.at(-1)!.completed.length : 0,
     duplicateEffects: keys.length - new Set(keys).size,
-    wastedEffects: keys.filter((k) => !finalKeys.has(k)).length,
+    wastedEffects: effects.filter((e, i) => effects.some((x, j) => j > i && x.action === e.action && JSON.stringify(x.params) !== JSON.stringify(e.params))).length,
     editDistance: revs.reduce((n, r) => n + r.edit.distance, 0),
     rejectedObservations: verdicts.filter((k) => k === 'rejected').length,
     staleObservations: verdicts.filter((k) => k === 'stale').length,
