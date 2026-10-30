@@ -66,7 +66,7 @@ Shared by every lane: simulated physics, the byte-identical signed event stream 
 Undisturbed control runs: every policy succeeds with zero revisions (tested). Metrics come only from the event log and the simulator's effect table.
 
 ## Why not LangGraph or Temporal
-LangGraph checkpoints graph state, but its interrupts re-run the node on resume and it offers no assumption tracking or effect idempotency — we would still write the ledger, contracts and commit guard. Temporal's durable history and validated updates are the right pattern (borrowed here: append-only history, single writer, deterministic replay) but need a server. A free single-instance demo is better served by ~1.5k lines of TypeScript on Node's built-in SQLite.
+LangGraph checkpoints graph state, but its interrupts re-run the node on resume and it offers no assumption tracking or effect idempotency — we would still write the ledger, contracts and commit guard. Temporal's durable history and validated updates are the right pattern (borrowed here: append-only history, single writer, deterministic replay) but need a server. A free single-instance demo is better served by ~1.9k lines of TypeScript on Node's built-in SQLite.
 
 ## Files
 `src/model.ts` contracts, conditions, projection, impact · `src/world.ts` evidence · `src/engine.ts` pure engine · `src/repair.ts` search + validator · `src/planner.ts` candidate sources · `src/store.ts` event store · `src/sim.ts` simulated executor/truth · `src/runner.ts` shell + clock · `src/metrics.ts` · `src/server.ts` API + SSE · `ui/` judge UI.
