@@ -8,6 +8,8 @@ import type { Facts, Json } from './model.ts';
  * `rank` arbitrates between sources: a lower-ranked source cannot overwrite a fact last set by a higher one.
  */
 export type Source = { id: string; key: string; mayAssert: string[]; rank: number };
+/** Allowed values for enumerated fact classes (`kind:*.attribute` pattern -> values). Anything else is rejected. */
+export type Enums = Record<string, Json[]>;
 export type Observation = { eventId: string; source: string; seq: number; fact: string; value: Json; observedAt: number; sig: string };
 
 export type FactMeta = { source: string; eventId: string; observedAt: number; rank: number };
@@ -46,7 +48,9 @@ export function initialWorld(facts: Facts): WorldState {
 }
 
 /** Pure verdict: what would ingesting `o` at clock `now` do? `apply` performs it. */
-export function judge(w: WorldState, o: Observation, sources: Record<string, Source>, now: number): Ingest {
+export function judge(w: WorldState, o: Observation, sources: Record<string, Source>, now: number, enums: Enums = {}): Ingest {
+  if (!o || typeof o.eventId !== 'string' || o.eventId.length > 80 || typeof o.source !== 'string' || typeof o.fact !== 'string') return { kind: 'rejected', reason: 'malformed observation' };
+  if (!Number.isSafeInteger(o.seq) || o.seq < 0) return { kind: 'rejected', reason: `sequence ${JSON.stringify(o.seq)} is not a non-negative safe integer` };
   const src = Object.hasOwn(sources, o.source) ? sources[o.source] : undefined;
   if (!src) return { kind: 'rejected', reason: `unknown source "${o.source}"` };
   if (typeof o.sig !== 'string' || o.sig !== sign(o, src.key)) return { kind: 'rejected', reason: `signature does not verify for ${o.source}` };
@@ -54,6 +58,9 @@ export function judge(w: WorldState, o: Observation, sources: Record<string, Sou
   if (!Number.isInteger(o.observedAt) || o.observedAt > now || now - o.observedAt > MAX_AGE) return { kind: 'rejected', reason: `timestamp t${o.observedAt} outside the accepted window at t${now}` };
   if (!Object.hasOwn(w.facts, o.fact)) return { kind: 'rejected', reason: `${o.fact} is not a known fact` };
   if (typeof o.value !== typeof w.facts[o.fact]) return { kind: 'rejected', reason: `${o.fact} must be a ${typeof w.facts[o.fact]}` };
+  if (typeof o.value === 'number' && !Number.isFinite(o.value)) return { kind: 'rejected', reason: `${o.fact} must be a finite number` };
+  const allowed = Object.entries(enums).find(([p]) => permits(p, o.fact))?.[1];
+  if (allowed && !allowed.includes(o.value)) return { kind: 'rejected', reason: `${JSON.stringify(o.value)} is not a known value of ${o.fact} (${allowed.join(', ')})` };
   // Only authenticated, permitted events reach dedupe, so a forgery cannot reserve a genuine event's id.
   const prior = w.seen[o.eventId];
   if (prior !== undefined) return prior === canonical(o) ? { kind: 'duplicate' } : { kind: 'rejected', reason: `event id ${o.eventId} reused with different content` };
@@ -74,7 +81,8 @@ export function apply(w: WorldState, o: Observation, v: Extract<Ingest, { kind: 
   return {
     rev: w.rev + (v.changed || v.becameUnstable ? 1 : 0),
     facts: { ...w.facts, [o.fact]: o.value },
-    meta: { ...w.meta, [o.fact]: { source: o.source, eventId: o.eventId, observedAt: o.observedAt, rank: src.rank } },
+    // Lower-ranked corroboration of the same value keeps the higher-ranked provenance (rank cannot be laundered).
+    meta: { ...w.meta, [o.fact]: !v.changed && (w.meta[o.fact]?.rank ?? 0) > src.rank ? w.meta[o.fact] : { source: o.source, eventId: o.eventId, observedAt: o.observedAt, rank: src.rank } },
     seen: { ...w.seen, [o.eventId]: canonical(o) },
     lastSeq: { ...w.lastSeq, [`${o.source}|${o.fact}`]: o.seq },
     changes,

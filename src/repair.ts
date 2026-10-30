@@ -35,9 +35,17 @@ export function validate(d: Domain, goal: Goal, cand: Draft[], remaining: Step[]
   checks.push({ id: 'shape', pass: shapeOk, detail: shapeOk ? 'well-formed step list (≤12 steps)' : 'malformed candidate' });
   if (!shapeOk) return fail();
   const unknown = cand.find((s) => !Object.hasOwn(d.actions, s.action));
-  checks.push({ id: 'catalog', pass: !unknown, detail: unknown ? `unknown action "${unknown.action}"` : 'every step is a registered action contract' });
+  checks.push({ id: 'catalog', pass: !unknown, detail: unknown ? `unknown action "${String(unknown.action).slice(0, 40)}"` : 'every step is a registered action contract' });
   if (unknown) return fail();
-  const badParam = cand.find((s) => !bindings(d, s.action, c.f).some((b) => stepSig({ action: s.action, params: b }) === stepSig(s)));
+  // Exact parameter names, scalar values only — checked before anything formats or compares them.
+  const scalar = (v: unknown) => typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v)) || typeof v === 'boolean';
+  const malformed = cand.find((s) => {
+    const want = Object.keys(contract(d, s.action).params).sort(), got = Object.keys(s.params).sort();
+    return want.length !== got.length || want.some((k, i) => k !== got[i]) || !got.every((k) => scalar(s.params[k]));
+  });
+  checks.push({ id: 'param-shape', pass: !malformed, detail: malformed ? `${malformed.action} needs exactly {${Object.keys(contract(d, malformed.action).params).join(', ')}} with scalar values` : 'parameter names and types match each contract' });
+  if (malformed) return fail();
+  const badParam = cand.find((s) => !bindings(d, s.action, c.f).some((b) => Object.keys(b).every((k) => b[k] === s.params[k])));
   checks.push({ id: 'params', pass: !badParam, detail: badParam ? `${stepSig(badParam)} binds an entity that does not exist` : 'all parameters bind to known entities' });
   if (badParam) return fail();
   const repeat = cand.find((s) => c.done.has(contract(d, s.action).effectKey(s.params)));

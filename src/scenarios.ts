@@ -2,10 +2,10 @@
 // a scenario is action contracts + initial beliefs + a world-time event feed + SIMULATED physics.
 import { createHash } from 'node:crypto';
 import type { Domain, Facts, Goal, Json, Params, Step } from './model.ts';
-import type { Source } from './world.ts';
+import type { Enums, Source } from './world.ts';
 
-/** One tick of the simulated clock = 5 simulated minutes. */
-export const TICK_MIN = 5;
+/** One tick of the simulated clock = 10 simulated minutes. */
+export const TICK_MIN = 10;
 
 export type SimEffect = { action: string; params: Params; tick: number; harm: string | null };
 /** What really happens in the SIMULATED world when an action runs (the agent never reads this). */
@@ -20,9 +20,15 @@ export type Scenario = {
   /** What observation sources report, in world time. Identical for every agent policy. */
   feed: FeedItem[];
   physics: Physics;
-  /** Ground-truth success, judged only on the simulated world. */
-  outcome(truthAt: (tick: number) => Facts, effects: SimEffect[], endTick: number): { met: boolean; detail: string };
+  /** Allowed values of enumerated facts; observations with any other value are rejected. */
+  enums: Enums;
+  /** Ground-truth success, judged only on the simulated world up to `endTick` (never on future events). */
+  outcome(truthAt: (tick: number) => Facts, effects: SimEffect[], endTick: number): { met: boolean; detail: string; pending?: boolean };
+  /** World time by which the outcome of the applied effects is decided (e.g. the truck's arrival). */
+  settle?(truthAt: (tick: number) => Facts, effects: SimEffect[]): number;
 };
+
+const PERMIT_OK = ['none', 'granted'];
 
 const keys = (f: Facts, re: RegExp) => Object.keys(f).map((k) => re.exec(k)?.[1]).filter((x): x is string => !!x);
 
@@ -83,7 +89,7 @@ const logistics: Domain = {
         { fact: `order:${p.order}.loadedOn`, op: 'eq', value: p.truck },
         { fact: `order:${p.order}.labelRoute`, op: 'eq', value: p.route },
         { fact: `route:${p.route}.status`, op: 'eq', value: 'open' },
-        { fact: `route:${p.route}.permit`, op: 'neq', value: 'required' },
+        { fact: `route:${p.route}.permit`, op: 'in', value: PERMIT_OK },
         { fact: `route:${p.route}.etaMin`, op: 'lte', ref: `order:${p.order}.slaMin` },
         { fact: `route:${p.route}.etaMin`, op: 'lte', ref: `order:${p.order}.coldHoldMin` },
       ],
@@ -131,12 +137,16 @@ const logisticsGoal: Goal = {
 };
 
 const logisticsPhysics: Physics = {
-  dispatch: (p, t) => t[`route:${p.route}.status`] === 'open'
-    ? {}
-    : { harm: `truck ${p.truck} dispatched onto closed route ${p.route}: stuck at the closure` },
+  dispatch: (p, t) => t[`route:${p.route}.status`] !== 'open'
+    ? { harm: `truck ${p.truck} dispatched onto closed route ${p.route}: stuck at the closure` }
+    : !PERMIT_OK.includes(t[`route:${p.route}.permit`] as string)
+      ? { harm: `truck ${p.truck} dispatched onto ${p.route} without a valid permit (${t[`route:${p.route}.permit`]}): turned back at the checkpoint` }
+      : {},
 };
 
-function logisticsOutcome(truthAt: (tick: number) => Facts, effects: SimEffect[]) {
+const arrival = (truthAt: (tick: number) => Facts, d: SimEffect) => d.tick + Math.ceil(Number(truthAt(d.tick)[`route:${d.params.route}.etaMin`]) / TICK_MIN);
+
+function logisticsOutcome(truthAt: (tick: number) => Facts, effects: SimEffect[], endTick: number) {
   const d = effects.find((e) => e.action === 'dispatch');
   const told = effects.some((e) => e.action === 'notify');
   const lie = told ? '; the customer was told it was on time' : '';
@@ -145,13 +155,21 @@ function logisticsOutcome(truthAt: (tick: number) => Facts, effects: SimEffect[]
   const route = String(d.params.route);
   const t0 = truthAt(d.tick);
   const eta = Number(t0[`route:${route}.etaMin`]);
-  for (let t = d.tick; t <= d.tick + Math.ceil(eta / TICK_MIN); t++) {
+  const arrives = arrival(truthAt, d);
+  for (let t = d.tick; t <= Math.min(arrives, endTick); t++) {
     if (truthAt(t)[`route:${route}.status`] !== 'open') return { met: false, detail: `route ${route} closed at t${t} while truck T1 was in transit: stuck, cold box at risk${lie}` };
   }
+  if (endTick < arrives) return { met: false, pending: true, detail: `truck T1 in transit on ${route}, due at t${arrives}` };
   if (eta > Number(t0['order:1042.slaMin']) || eta > Number(t0['order:1042.coldHoldMin'])) return { met: false, detail: `route ${route} takes ${eta} min: SLA or cold-hold broken${lie}` };
   if (!told) return { met: false, detail: 'delivered, but the customer was never notified' };
   return { met: true, detail: `order #1042 delivered via ${route} in ${eta} min (SLA 70, cold-hold 90)` };
 }
+
+const logisticsEnums: Enums = { 'route:*.status': ['open', 'closed'], 'route:*.permit': ['none', 'required', 'granted', 'revoked'] };
+const logisticsSettle = (truthAt: (tick: number) => Facts, effects: SimEffect[]) => {
+  const d = effects.find((e) => e.action === 'dispatch' && !e.harm);
+  return d ? arrival(truthAt, d) : 0;
+};
 
 // Simulation-only HMAC keys; every source in the demo is labelled SIMULATED.
 const logisticsSources: Record<string, Source> = {
@@ -273,7 +291,7 @@ export const scenarios: Record<string, Scenario> = {
     id: 'delivery', title: 'Cold-chain delivery: a road closes after packing',
     blurb: 'Order #1042 is picked and sealed in its cold box. While it is being loaded, the traffic authority closes route R1.',
     domain: logistics, goal: logisticsGoal, facts: logisticsFacts, plan: logisticsPlan,
-    sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome,
+    sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome, enums: logisticsEnums, settle: logisticsSettle,
     truth: [{ tick: 6, fact: 'route:R1.status', value: 'closed' }],
     feed: [
       { tick: 3, source: 'weather-feed', fact: 'weather:depot.tempC', value: 31 },
@@ -284,7 +302,7 @@ export const scenarios: Record<string, Scenario> = {
   recovery: {
     id: 'recovery', title: 'Service recovery: the failover target degrades',
     blurb: 'Checkout in region-a is degraded. While traffic is being shifted to region-b, the dependency monitor reports region-b degraded too.',
-    domain: ops, facts: opsFacts, physics: opsPhysics, goal: opsGoal, outcome: opsOutcome,
+    domain: ops, facts: opsFacts, physics: opsPhysics, goal: opsGoal, outcome: opsOutcome, enums: { 'svc:*.status': ['healthy', 'degraded'] },
     plan: [
       { id: 's1', action: 'snapshot_db', params: {} },
       { id: 's2', action: 'shift_traffic', params: { to: 'region-b' } },
@@ -306,7 +324,7 @@ export const scenarios: Record<string, Scenario> = {
     id: 'flapping', title: 'Adaptation failure: a faulty sensor flaps both routes',
     blurb: 'road-sensor-7 flips R1 and R2 between open and closed; a forged closure arrives from an unregistered source. Only the traffic authority is right.',
     domain: logistics, goal: logisticsGoal, facts: logisticsFacts, plan: logisticsPlan,
-    sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome,
+    sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome, enums: logisticsEnums, settle: logisticsSettle,
     truth: [{ tick: 2, fact: 'route:R1.status', value: 'closed' }],
     feed: [
       { tick: 2, source: 'road-sensor-7', fact: 'route:R1.status', value: 'closed' },

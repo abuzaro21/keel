@@ -17,7 +17,7 @@ type Revision = {
 type Ev = { t: string; [k: string]: any };
 type Row = { runId: string; n: number; kind: string; input: boolean; tick: number; wall: number; ev: Ev };
 type Metrics = {
-  policy: string; status: string; pause: string | null; beliefGoalMet: boolean | null; goalMet: boolean; truth: string;
+  policy: string; status: string; pause: string | null; beliefGoalMet: boolean | null; goalMet: boolean; truth: string; outcomePending: boolean; violations: string[];
   invalidActions: number; prevented: number; fenced: number; revisions: number; preservedCompleted: number; duplicateEffects: number; wastedEffects: number;
   editDistance: number; rejectedObservations: number; staleObservations: number; duplicateObservations: number;
   latency: { eventId: string; ingressToDetectMs: number; ingressToCommitMs: number | null; eventToDetectTicks: number; eventToCommitTicks: number | null }[];
@@ -138,7 +138,7 @@ export function App() {
 
       {sc && session && (
         <section className="inject" aria-label="Change the simulated world">
-          <h2>Change reality <small>both agents receive the same signed event at the same tick</small></h2>
+          <h2>Change reality <small>changes the simulated world for both agents; its registered source reports it to both at the same tick</small></h2>
           <div className="inject-row">
             {sc.injectable.flatMap((x) => x.values.map((v) => (
               <button key={`${x.fact}=${v}`} disabled={busy} onClick={() => post('inject', { fact: x.fact, value: v })}>
@@ -147,7 +147,7 @@ export function App() {
             )))}
             {sc.injectable[0] && (
               <button className="forge" disabled={busy} onClick={() => post('inject', { fact: sc.injectable[0].fact, value: sc.injectable[0].values[1], forged: true })}>
-                <code>forge: {short(sc.injectable[0].fact)} = {String(sc.injectable[0].values[1])}</code><small>bad signature</small>
+                <code>forge: {short(sc.injectable[0].fact)} = {String(sc.injectable[0].values[1])}</code><small>fake observation · changes nothing real</small>
               </button>
             )}
           </div>
@@ -210,10 +210,11 @@ function Lane({ run, tickMs, tick, onOperator, onCrash, busy }: { run: Run; tick
       {last && adaptive && <ReasonCard rev={last} count={revs.length} />}
 
       {finished && (
-        <div className={`outcome ${m.goalMet ? 'ok' : 'bad'}`} aria-live="polite">
+        <div className={`outcome ${m.outcomePending ? 'wait' : m.goalMet ? 'ok' : 'bad'}`} aria-live="polite">
           <div><span className="eyebrow">Agent believes</span><strong>{m.beliefGoalMet === null ? (v.status === 'paused' ? 'stopped — goal not reached' : '—') : m.beliefGoalMet ? '✓ goal met' : '✗ goal not met'}</strong></div>
-          <div><span className="eyebrow">Simulated world</span><strong>{m.goalMet ? '✓ ' : '✗ '}{m.truth}</strong></div>
-          {completed && m.beliefGoalMet && !m.goalMet && <p className="silent">Silent failure: every step has a receipt, the agent reports success, and the world disagrees.</p>}
+          <div><span className="eyebrow">Simulated world</span><strong>{m.outcomePending ? '… ' : m.goalMet ? '✓ ' : '✗ '}{m.truth}</strong></div>
+          {m.violations.length > 0 && <div><span className="eyebrow">Known violation</span><span>{m.violations.join('; ')}</span></div>}
+          {completed && m.beliefGoalMet && !m.goalMet && !m.outcomePending && <p className="silent">Silent failure: every step has a receipt, the agent reports success, and the world disagrees.</p>}
         </div>
       )}
 

@@ -8,7 +8,9 @@ import { scenarios } from './scenarios.ts';
 export type RunMetrics = {
   runId: string; policy: string; status: string; pause: string | null;
   beliefGoalMet: boolean | null;     // what the agent itself reported
-  goalMet: boolean; truth: string;   // what actually happened in the simulated world
+  goalMet: boolean; truth: string;   // what actually happened in the simulated world (up to now)
+  outcomePending: boolean;           // e.g. truck still in transit: no verdict yet
+  violations: string[];              // commitments the agent itself recorded as broken
   invalidActions: number;            // effects the simulated world recorded as harmful
   prevented: number;                 // steps whose broken assumption was caught before they ran
   fenced: number;                    // operations cancelled inside their preparation window
@@ -29,7 +31,7 @@ export function runMetrics(store: Store, sim: Sim, runId: string): RunMetrics {
   const S = scenarios[start.scenario];
   const evs = rows.map((r) => r.ev);
   const revs = evs.flatMap((e) => (e.t === 'revision' ? [e.record as RevisionRecord] : []));
-  const lastTick = rows.at(-1)!.tick;
+  const lastTick = Math.max(rows.at(-1)!.tick, store.clock(runId));
   const out = sim.outcome(runId, S, lastTick);
   const effects = sim.effects(runId);
   const keys = effects.map((e) => contract(S.domain, e.action).effectKey(e.params));
@@ -55,7 +57,8 @@ export function runMetrics(store: Store, sim: Sim, runId: string): RunMetrics {
     status: status?.t === 'resumed' ? 'running' : status?.t ?? 'running',
     pause: status?.t === 'paused' ? status.reason : null,
     beliefGoalMet: completed && completed.t === 'completed' ? completed.beliefGoalMet : null,
-    goalMet: out.met, truth: out.detail,
+    goalMet: out.met, truth: out.detail, outcomePending: !!out.pending,
+    violations: evs.flatMap((e) => (e.t === 'violation' ? [e.text] : [])),
     invalidActions: effects.filter((e) => e.harm).length,
     prevented: [...caught].filter((id) => !executedSteps.has(id)).length,
     fenced,

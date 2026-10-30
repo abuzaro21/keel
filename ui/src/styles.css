@@ -120,6 +120,7 @@ h2 small, summary small { font-weight: 400; color: var(--muted); margin-left: 8p
 .outcome { border-radius: var(--r); padding: 12px 14px; display: grid; gap: 6px; }
 .outcome.ok { background: var(--green-bg); }
 .outcome.bad { background: var(--red-bg); }
+.outcome.wait { background: var(--panel-2); border: 1px dashed var(--line); }
 .outcome div { display: grid; grid-template-columns: 130px 1fr; gap: 10px; align-items: baseline; }
 .outcome.bad strong { color: var(--red); }
 .outcome.ok strong { color: var(--green); }

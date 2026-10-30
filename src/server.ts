@@ -83,6 +83,12 @@ export function startServer(port = Number(process.env.PORT ?? 3000), dbPath = pr
     for (const res of subs) res.write(msg);
   });
 
+  hub.tickListeners.add((s) => {
+    const subs = streams.get(s.id);
+    if (!subs?.size) return;
+    for (const r of s.runIds) { const msg = frame(hub, r, []); for (const res of subs) res.write(msg); }
+  });
+
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://x');
@@ -128,6 +134,8 @@ export function startServer(port = Number(process.env.PORT ?? 3000), dbPath = pr
           const seqs = s.runIds.map((r) => hub.state(r)!.world.lastSeq[`${src.id}|${allowed.fact}`] ?? 0);
           const o = { eventId: `inj-${randomUUID().slice(0, 8)}`, source: src.id, seq: Math.max(...seqs, 1000 + s.tick) + 1, fact: allowed.fact, value: body.value as Json, observedAt: s.tick };
           const obs = { ...o, sig: body.forged ? sign(o, 'visitor-forgery') : sign(o, src.key) };
+          // A genuine injection changes SIMULATED reality for every run, and the source reports it. A forgery changes nothing real.
+          if (!body.forged) hub.store.addWorldChange(s.id, s.tick, allowed.fact, body.value);
           s.injectAll(obs);
           return json(res, 202, { eventId: obs.eventId, forged: !!body.forged });
         }

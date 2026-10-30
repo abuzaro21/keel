@@ -5,13 +5,16 @@
 // decisions ask for (dispatch/commit_effect -> simulator, repair_requested -> planners, reconcile_requested).
 // Nothing here reads a clock: the engine only ever wakes because an input arrived.
 import { createHash } from 'node:crypto';
-import { activeObligations, condText, contract, entityOf, evalCond, impact, project, referencedFacts, stepSig } from './model.ts';
+import { activeObligations, condText, contract, editOps, entityOf, evalCond, impact, project, referencedFacts, stepSig } from './model.ts';
+import * as modelCore from './model.ts';
+import * as worldCore from './world.ts';
+import * as repairCore from './repair.ts';
 import type { Ctx, Facts, Goal, Json, Params, Plan, Step } from './model.ts';
 import { validate } from './repair.ts';
 import type { Candidate, Check } from './repair.ts';
 import { apply, applyReceipt, confirm, initialWorld, judge } from './world.ts';
 import type { Ingest, Observation, WorldState } from './world.ts';
-import { contractHash, scenarios } from './scenarios.ts';
+import { contractHash as actionsHash, scenarios } from './scenarios.ts';
 import type { Scenario } from './scenarios.ts';
 
 export type PolicyName = 'keel' | 'static' | 'naive' | 'guarded';
@@ -69,6 +72,7 @@ export type Ev =
   | { t: 'reconcile_requested'; opId: string; gen: number }
   | { t: 'paused'; kind: PauseKind; reason: string }
   | { t: 'resumed'; by: string }
+  | { t: 'violation'; key: string; text: string; at: number }
   | { t: 'completed'; beliefGoalMet: boolean; detail: string }
   | { t: 'stopped'; reason: string };
 
@@ -87,6 +91,8 @@ export type RunState = {
   awaiting: { contradictionId: string; trigger: TriggerView | null } | null;
   lastContradiction: Extract<Ev, { t: 'contradiction' }> | null;
   sinceRevision: string[];
+  /** Commitments the agent KNOWS were broken while live (e.g. served traffic from a degraded region). Never erased. */
+  violations: { key: string; text: string; at: number }[];
   abandoned: { sig: string; doneCount: number }[];
   revisions: number; budget: number | null; proposals: number; tick: number; seq: number;
 };
@@ -102,6 +108,15 @@ export const ctxOf = (s: RunState): Ctx => {
 const tailSig = (steps: Pick<Step, 'action' | 'params'>[]) => steps.map(stepSig).join(' > ');
 /** Semantic operation id = hash(run, effect). Each preparation of it gets a new generation. */
 export const opIdFor = (runId: string, effectKey: string) => createHash('sha256').update(`${runId}|${effectKey}`).digest('hex').slice(0, 12);
+/**
+ * Version of everything that decides: action contracts + sources (scenarios.ts) and the core rule modules.
+ * Replay refuses a run recorded under different semantics (e.g. a changed timestamp window).
+ */
+export function contractHash(S: Scenario): string {
+  const src = (m: object) => Object.entries(m).map(([k, v]) => `${k}=${typeof v === 'function' ? v.toString() : JSON.stringify(v)}`).join('\n');
+  return createHash('sha256').update([actionsHash(S), JSON.stringify(S.enums), src(modelCore), src(worldCore), src(repairCore), reduce.toString(), decide.toString()].join('\n')).digest('hex').slice(0, 16);
+}
+
 export function startContext(scenario: string, policy: PolicyName): RunContext {
   const S = scenarios[scenario];
   return { facts: S.facts, plan: S.plan, goal: S.goal, policy: policies[policy], contractHash: contractHash(S) };
@@ -116,7 +131,7 @@ export function reduce(s: RunState | null, e: Ev): RunState {
     return {
       runId: e.runId, scenario: e.scenario, policy: e.context.policy.name, cfg: e.context.policy, goal: e.context.goal,
       status: 'running', pause: null, world: initialWorld(e.context.facts), plan, plans: [plan], ledger: {}, done: [], inflight: null,
-      pending: null, awaiting: null, lastContradiction: null, sinceRevision: [], abandoned: [],
+      pending: null, awaiting: null, lastContradiction: null, sinceRevision: [], violations: [], abandoned: [],
       revisions: 0, budget: e.context.policy.budget, proposals: 0, tick: e.at, seq: 1,
     };
   }
@@ -140,7 +155,7 @@ export function reduce(s: RunState | null, e: Ev): RunState {
     case 'commit_effect': if (sameGen) setRow({ state: 'committing', expect: e.expect }); return n;
     case 'effect_uncertain': if (sameGen) setRow({ state: 'uncertain' }); return n;
     case 'receipt': case 'reconciled': {
-      if (!row || !sameGen || row.state === 'done') return n; // wrong generation or duplicate receipt: counted once
+      if (!row || !sameGen || (row.state !== 'committing' && row.state !== 'uncertain')) return n; // wrong generation, duplicate, or work that was never committed
       if (e.t === 'reconciled' && e.found !== 'yes') {
         setRow({ state: e.found === 'no' ? 'not_applied' : 'uncertain' });
         if (e.found === 'no') n.inflight = null;
@@ -155,6 +170,7 @@ export function reduce(s: RunState | null, e: Ev): RunState {
     case 'operator':
       if (e.cmd === 'confirm' && e.fact) n.world = confirm(s.world, e.fact, e.value ?? null, e.at, Math.max(...Object.values(sc(s).sources).map((x) => x.rank)));
       return n;
+    case 'violation': n.violations = [...s.violations, { key: e.key, text: e.text, at: e.at }]; return n;
     case 'contradiction':
       n.lastContradiction = e;
       n.awaiting = e.awaiting ? { contradictionId: e.id, trigger: e.trigger } : null;
@@ -202,11 +218,11 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
   const S = sc(s), D = S.domain, P = s.cfg, G = s.goal;
 
   if (s.status === 'stopped' || s.status === 'completed') {
-    if (input.t === 'observation') emit({ t: 'verdict', obs: input.obs, v: judge(s.world, input.obs, S.sources, input.at) });
+    if (input.t === 'observation') emit({ t: 'verdict', obs: input.obs, v: judge(s.world, input.obs, S.sources, input.at, S.enums) });
     return out;
   }
-  /** Containment pauses latch: only an operator command lifts them. `no_repair` and `stale` wait for evidence. */
-  const latched = () => s.status === 'paused' && s.pause?.kind !== 'no_repair' && s.pause?.kind !== 'stale';
+  /** Containment pauses latch: only an operator command lifts them. Only `no_repair` waits for evidence. */
+  const latched = () => s.status === 'paused' && s.pause?.kind !== 'no_repair';
 
   const requestRepair = (contradictionId: string | null, attempt = 1) => {
     if (s.proposals >= P.planBudget) {
@@ -222,6 +238,7 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
     const c = ctxOf(s);
     // While paused on a broken plan, any accepted change may open a repair path, so it is never "no impact".
     const pausedBroken = s.status === 'paused' && s.pause?.kind === 'no_repair';
+    noteViolations();
     if (changedFact && !P.reviseOnAnyChange && !pausedBroken && !referencedFacts(D, G, remaining, c).has(changedFact)) {
       emit({ t: 'assessed', fact: changedFact, result: 'no_impact', detail: `no remaining step, live commitment or goal condition reads ${changedFact}` });
       return;
@@ -262,12 +279,25 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
     requestRepair(id, attempt);
   };
 
+  /** Record, once and forever, any live commitment the agent now knows is broken. Releasing it later does not erase it. */
+  function noteViolations() {
+    if (!P.detect) return;
+    for (const o of ctxOf(s).active) {
+      if (evalCond(o.cond, s.world.facts) !== 'false') continue;
+      const key = `${o.from}|${condText(o.cond)}`;
+      if (!s.violations.some((v) => v.key === key)) emit({ t: 'violation', key, text: `${o.from} committed to ${condText(o.cond)}, and it stopped holding at t${s.tick}`, at: s.tick });
+    }
+  }
+
   const advance = () => {
     if (s.status !== 'running' || s.inflight || s.pending) return;
     const next = remainingOf(s)[0];
     if (!next) {
       const met = G.success.every((c) => evalCond(c, s.world.facts) === 'true');
-      emit({ t: 'completed', beliefGoalMet: met, detail: met ? 'every step has a receipt; the agent believes the goal is met' : 'plan finished, but the agent does not believe every goal condition holds' });
+      const v = s.violations;
+      emit({ t: 'completed', beliefGoalMet: met && !v.length, detail: !met ? 'plan finished, but the agent does not believe every goal condition holds'
+        : v.length ? `plan finished, but the goal was not met as stated: ${v.map((x) => x.text).join('; ')}`
+        : 'every step has a receipt; the agent believes the goal is met' });
       return;
     }
     const a = contract(D, next.action);
@@ -284,7 +314,7 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
     case 'start': break;
     case 'observation': {
       const prev = s.world.facts[input.obs.fact];
-      const v = judge(s.world, input.obs, S.sources, input.at);
+      const v = judge(s.world, input.obs, S.sources, input.at, S.enums);
       emit({ t: 'verdict', obs: input.obs, v });
       if (v.kind !== 'applied' || !(v.changed || v.becameUnstable)) break;
       const trig: TriggerView = { eventId: input.obs.eventId, source: input.obs.source, fact: input.obs.fact, prev, value: input.obs.value, observedAt: input.obs.observedAt };
@@ -309,9 +339,15 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
       emit({ t: 'commit_effect', opId: row.opId, gen: row.gen, expect });
       break;
     }
-    case 'receipt':
+    case 'receipt': {
+      const row = s.ledger[input.opId];
+      if (row && row.gen === input.gen && row.state === 'cancelled') {
+        emit({ t: 'paused', kind: 'ambiguous', reason: `a receipt arrived for ${stepSig(row)}, which was cancelled before its effect; an operator must reconcile before anything else runs` });
+        break;
+      }
       if (P.detect && !s.inflight && !latched()) evaluate(s.awaiting?.trigger ?? null, null, 1, true);
       break;
+    }
     case 'effect_uncertain': emit({ t: 'reconcile_requested', opId: input.opId, gen: input.gen }); break;
     case 'reconciled': {
       const row = s.ledger[input.opId];
@@ -364,7 +400,7 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
     const valid = judged.filter((j) => j.v.valid).sort((a, b) => P.rank === 'edit'
       ? a.v.distance - b.v.distance || a.v.cost - b.v.cost || a.i - b.i
       : a.v.cost - b.v.cost || a.i - b.i);
-    const sig = (x: unknown) => { const d = x as { action?: unknown; params?: unknown }; return d && typeof d.action === 'string' ? stepSig({ action: d.action, params: (d.params && typeof d.params === 'object' ? d.params : {}) as Params }) : '?'; };
+    const sig = (x: unknown) => { try { return JSON.stringify(x)?.slice(0, 160) ?? '?'; } catch { return '?'; } };
     const rejected = judged.filter((j) => !j.v.valid).map((j) => ({ origin: String(j.cand.origin), steps: (Array.isArray(j.cand.steps) ? j.cand.steps : []).map(sig), failed: j.v.checks.filter((x) => !x.pass) }));
     const keep = (detail: string) => emit({ t: 'assessed', fact: null, result: 'kept_plan', detail });
     if (!valid.length) {
@@ -396,7 +432,7 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
     const f0 = lc?.failures[0];
     const removedSteps = remaining.filter((x) => !newTail.includes(x));
     const addedSteps = newTail.filter((x) => !remaining.includes(x));
-    const modified = addedSteps.filter((a) => removedSteps.some((r) => r.action === a.action)).length;
+    const ops = editOps(remaining, newTail);
     const assumed = f0 ? (f0.obligation ? `${f0.obligation} committed to ${f0.cond}` : `${f0.sig} assumed ${f0.cond}`) : '';
     emit({
       t: 'revision', record: {
@@ -409,7 +445,7 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
         newObservation: trig ? `${trig.fact} = ${JSON.stringify(trig.value)} from ${trig.source} at t${trig.observedAt} (was ${JSON.stringify(trig.prev)})` : null,
         contradiction: lc?.failures ?? [], affected: lc?.affected ?? [], preserved: lc?.preserved ?? [], completed: doneSteps.map((x) => x.id),
         removed: removedSteps.map(stepSig), added: addedSteps.map(stepSig),
-        edit: { inserted: addedSteps.length - modified, removed: removedSteps.length - modified, modified, distance: best.v.distance },
+        edit: { inserted: ops.inserted, removed: ops.removed, modified: ops.modified, distance: ops.distance },
         checks: best.v.checks, chosen: { origin: best.cand.origin, scope: best.cand.scope ?? 'local', rationale: best.cand.rationale, cost: best.v.cost, model: best.cand.model },
         rejected, before: prevSteps, after: [...doneSteps, ...newTail],
       },

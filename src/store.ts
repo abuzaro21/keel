@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Ev } from './engine.ts';
+import type { Json } from './model.ts';
 import { INPUTS } from './engine.ts';
 
 export type Row = { runId: string; n: number; kind: string; input: boolean; tick: number; wall: number; ev: Ev };
@@ -23,6 +24,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS sim_effects (
         op_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, action TEXT NOT NULL, params TEXT NOT NULL,
         request_hash TEXT NOT NULL, tick INTEGER NOT NULL, harm TEXT, sets TEXT NOT NULL, applied TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS world_changes (session TEXT NOT NULL, tick INTEGER NOT NULL, fact TEXT NOT NULL, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS world_clock (session TEXT PRIMARY KEY, tick INTEGER NOT NULL);
     `);
   }
 
@@ -61,6 +64,24 @@ export class Store {
   }
 
   events(runId: string): Ev[] { return this.rows(runId).map((r) => r.ev); }
+
+  /** Simulated world time, persisted so outcomes (e.g. arrival) are judged from records, not from memory. */
+  setClock(session: string, tick: number) {
+    this.db.prepare('INSERT INTO world_clock (session, tick) VALUES (?, ?) ON CONFLICT(session) DO UPDATE SET tick = excluded.tick').run(session, tick);
+  }
+  clock(runId: string): number {
+    const r = this.db.prepare('SELECT c.tick FROM world_clock c JOIN runs r ON r.session = c.session WHERE r.run_id = ?').get(runId) as { tick: number } | undefined;
+    return Number(r?.tick ?? 0);
+  }
+
+  /** A visitor-made change to SIMULATED ground truth, shared by every run of the session. */
+  addWorldChange(session: string, tick: number, fact: string, value: unknown) {
+    this.db.prepare('INSERT INTO world_changes (session, tick, fact, value) VALUES (?, ?, ?, ?)').run(session, tick, fact, JSON.stringify(value));
+  }
+  worldChanges(runId: string): { tick: number; fact: string; value: Json }[] {
+    return (this.db.prepare('SELECT w.tick, w.fact, w.value FROM world_changes w JOIN runs r ON r.session = w.session WHERE r.run_id = ? ORDER BY w.rowid').all(runId) as Record<string, unknown>[])
+      .map((r) => ({ tick: Number(r.tick), fact: r.fact as string, value: JSON.parse(r.value as string) }));
+  }
 
   runs(session?: string): { runId: string; session: string; scenario: string; policy: string; created: number }[] {
     const q = session ? this.db.prepare('SELECT * FROM runs WHERE session = ? ORDER BY run_id').all(session) : this.db.prepare('SELECT * FROM runs ORDER BY created').all();

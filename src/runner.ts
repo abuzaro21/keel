@@ -35,6 +35,8 @@ export class Hub {
   states = new Map<string, RunState>();
   sessions = new Map<string, Session>();
   listeners = new Set<Listener>();
+  /** Presentation only: told when a session's world clock advances (the agent is never told). */
+  tickListeners = new Set<(session: Session) => void>();
   /** Test-only crash injection: SIGKILL this process around the effect boundary of one effect key. */
   failpoint: string | null = process.env.KEEL_FAILPOINT ?? null;
   failEffect: string | null = process.env.KEEL_FAILPOINT_EFFECT ?? null;
@@ -167,6 +169,8 @@ export class Session {
   inject(runId: string, obs: Observation) { this.hub.submit(runId, { t: 'observation', obs, at: this.tick }, this); }
   injectAll(obs: Observation) { for (const r of this.runIds) this.inject(r, obs); }
 
+  advanceClock() { this.tick++; this.hub.store.setClock(this.id, this.tick); for (const l of this.hub.tickListeners) l(this); }
+
   runDue() {
     while (this.queue.length && this.queue[0].tick <= this.tick) this.queue.shift()!.fn();
   }
@@ -176,7 +180,7 @@ export class Session {
     while (this.tick <= maxTick) {
       this.runDue();
       if (!this.queue.length && this.runIds.every((r) => this.settled(r))) break;
-      this.tick++;
+      this.advanceClock();
     }
     return this;
   }
@@ -188,7 +192,7 @@ export class Session {
     this.timer = setInterval(() => {
       this.runDue();
       if ((this.tick >= maxTick) || (!this.queue.length && this.runIds.every((r) => this.settled(r)))) return this.stop();
-      this.tick++;
+      this.advanceClock();
     }, ms);
   }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
@@ -197,6 +201,7 @@ export class Session {
 
   settled(runId: string) {
     const s = this.hub.state(runId);
+    if (s && this.tick < this.hub.sim.settleTick(runId, scenarios[s.scenario])) return false; // truck still in transit
     return !s || s.status === 'completed' || s.status === 'stopped' || (s.status === 'paused' && !s.inflight);
   }
 }

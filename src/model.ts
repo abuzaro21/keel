@@ -3,9 +3,9 @@
 
 export type Json = string | number | boolean | null;
 export type Facts = Record<string, Json>;
-export type Op = 'eq' | 'neq' | 'lt' | 'lte' | 'gt' | 'gte';
-/** An assumption. Compared against a literal `value` or against another fact (`ref`). */
-export type Cond = { fact: string; op: Op; value?: Json; ref?: string };
+export type Op = 'eq' | 'neq' | 'in' | 'lt' | 'lte' | 'gt' | 'gte';
+/** An assumption. Compared against a literal `value` (a list for `in`) or against another fact (`ref`). */
+export type Cond = { fact: string; op: Op; value?: Json | Json[]; ref?: string };
 export type Params = Record<string, Json>;
 
 export type ActionContract = {
@@ -48,6 +48,8 @@ export function evalCond(c: Cond, f: Facts, unstable: ReadonlySet<string> = new 
   const a = f[c.fact];
   const b = c.ref !== undefined ? f[c.ref] : c.value;
   if (a === undefined || b === undefined) return 'unknown';
+  if (c.op === 'in') return Array.isArray(b) && b.includes(a) ? 'true' : 'false'; // positive allow-list: unknown states fail closed
+  if (Array.isArray(b)) return 'unknown';
   if (c.op === 'eq') return a === b ? 'true' : 'false';
   if (c.op === 'neq') return a !== b ? 'true' : 'false';
   // Ordering needs two finite numbers. `600 >= null` must not pass a guard.
@@ -83,38 +85,39 @@ export type Projection = { ok: boolean; failures: Failure[]; goalFailures: Cond[
 
 /**
  * Walk the not-yet-done steps forward from current beliefs, applying each step's expected effects.
- * A step fails if an assumption is false/unknown where it would run, if it would break a live obligation,
- * or if it is irreversible while an obligation is already broken and it does not release it.
- * A broken obligation never released by the plan is a goal failure: the commitment is never re-established.
+ * Live obligations are re-evaluated at every position (never a sticky flag). A step fails if:
+ *  - an assumption is false/unknown where it would run;
+ *  - it is irreversible while an obligation it does not release is broken at that point;
+ *  - its effects would break an obligation that held before it (even one a later step releases);
+ *  - an obligation it creates does not hold right after it.
+ * An obligation still broken at the end is a goal failure: the commitment is never re-established.
  */
 export function project(d: Domain, goal: Goal, steps: Step[], c: Ctx): Projection {
   const end: Facts = { ...c.f };
   const failures: Failure[] = [];
   let cost = 0;
-  let ob = c.active.map((o) => ({ ...o, broken: evalCond(o.cond, end, c.unstable) !== 'true' }));
+  let ob: Obligation[] = [...c.active];
+  const holds = (o: Obligation) => evalCond(o.cond, end, c.unstable) === 'true';
+  const fail = (s: Step, index: number, o: Obligation) =>
+    failures.push({ stepId: s.id, index, cond: o.cond, truth: evalCond(o.cond, end, c.unstable), actual: end[o.cond.fact], obligation: o.from });
   steps.forEach((s, index) => {
     const a = contract(d, s.action);
     if (c.done.has(a.effectKey(s.params))) return;
-    const releases = (o: { action: string }) => !!a.releases?.includes(o.action);
-    for (const o of ob) {
-      if (releases(o)) continue;
-      if (o.broken ? a.commitment === 'irreversible' : evalCond(o.cond, end, c.unstable) !== 'true') {
-        failures.push({ stepId: s.id, index, cond: o.cond, truth: evalCond(o.cond, end, c.unstable), actual: end[o.cond.fact], obligation: o.from });
-      }
-    }
+    const kept = ob.filter((o) => !a.releases?.includes(o.action));
+    const heldBefore = new Map(kept.map((o) => [o, holds(o)]));
+    if (a.commitment === 'irreversible') for (const o of kept) if (!heldBefore.get(o)) fail(s, index, o);
     for (const r of a.requires(s.params)) {
       const t = evalCond(r, end, c.unstable);
       if (t !== 'true') failures.push({ stepId: s.id, index, cond: r, truth: t, actual: end[r.fact] });
     }
     cost += a.cost(s.params, end);
     Object.assign(end, a.produces(s.params, end));
-    ob = ob.filter((o) => !releases(o));
-    for (const cond of a.maintains?.(s.params) ?? []) ob.push({ cond, action: a.type, from: stepSig(s), broken: false });
+    for (const o of kept) if (heldBefore.get(o) && !holds(o)) fail(s, index, o);
+    const created = (a.maintains?.(s.params) ?? []).map((cond) => ({ cond, action: a.type, from: stepSig(s) }));
+    for (const o of created) if (!holds(o) && !failures.some((f) => f.index === index && condText(f.cond) === condText(o.cond))) fail(s, index, o);
+    ob = [...kept, ...created];
   });
-  const goalFailures = [
-    ...goal.success.filter((g) => evalCond(g, end, c.unstable) !== 'true'),
-    ...ob.filter((o) => o.broken || evalCond(o.cond, end, c.unstable) !== 'true').map((o) => o.cond),
-  ];
+  const goalFailures = [...goal.success.filter((g) => evalCond(g, end, c.unstable) !== 'true'), ...ob.filter((o) => !holds(o)).map((o) => o.cond)];
   return { ok: failures.length === 0 && goalFailures.length === 0, failures, goalFailures, end, cost };
 }
 
@@ -155,6 +158,20 @@ export function impact(d: Domain, steps: Step[], failures: Failure[], done: Read
   }
   const preserved = steps.filter((s) => !affected.has(s.id)).map((s) => s.id);
   return { affected: steps.filter((s) => affected.has(s.id)).map((s) => s.id), preserved, completed };
+}
+
+/** One-to-one alignment behind the edit distance: how many steps were rebound, inserted and removed. */
+export function editOps(a: Pick<Step, 'action' | 'params'>[], b: Pick<Step, 'action' | 'params'>[]) {
+  const x = a.map(stepSig), y = b.map(stepSig);
+  const D = Array.from({ length: x.length + 1 }, (_, i) => Array.from({ length: y.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  for (let i = 1; i <= x.length; i++) for (let j = 1; j <= y.length; j++) D[i][j] = Math.min(D[i - 1][j] + 1, D[i][j - 1] + 1, D[i - 1][j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1));
+  let i = x.length, j = y.length, modified = 0, inserted = 0, removed = 0;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && D[i][j] === D[i - 1][j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1)) { if (x[i - 1] !== y[j - 1]) modified++; i--; j--; }
+    else if (j > 0 && D[i][j] === D[i][j - 1] + 1) { inserted++; j--; }
+    else { removed++; i--; }
+  }
+  return { modified, inserted, removed, distance: D[x.length][y.length] };
 }
 
 /** Levenshtein distance over step signatures — the transparent "how much did the plan change" metric. */
