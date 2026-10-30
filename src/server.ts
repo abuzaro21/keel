@@ -175,7 +175,7 @@ function stream(req: IncomingMessage, res: ServerResponse, hub: Hub, s: Session,
 
 function evictOldest(hub: Hub) {
   const [id, s] = hub.sessions.entries().next().value!;
-  s.stop();
+  s.close();
   hub.sessions.delete(id);
   for (const r of s.runIds) hub.states.delete(r);
 }

@@ -112,6 +112,7 @@ export class Session {
   private queue: Task[] = [];
   private n = 0;
   private timer: NodeJS.Timeout | null = null;
+  private ms = 0;
   runIds: string[];
   hub: Hub; id: string; scenario: string; policyNames: PolicyName[];
 
@@ -126,6 +127,7 @@ export class Session {
   schedule(tick: number, pri: number, runId: string | null, fn: () => void) {
     this.queue.push({ tick, pri, seq: this.n++, runId, fn });
     this.queue.sort((a, b) => a.tick - b.tick || a.pri - b.pri || a.seq - b.seq);
+    if (this.ms && !this.timer) this.play(this.ms); // new work (e.g. after an operator resume) restarts a settled clock
   }
   dropAgentTasks(runId: string) { this.queue = this.queue.filter((t) => t.runId !== runId || t.pri === 0); }
 
@@ -180,8 +182,9 @@ export class Session {
   }
 
   /** Real time for the live demo: one tick every `ms`. */
-  play(ms: number, maxTick = 80) {
+  play(ms: number, maxTick = 200) {
     this.stop();
+    this.ms = ms;
     this.timer = setInterval(() => {
       this.runDue();
       if ((this.tick >= maxTick) || (!this.queue.length && this.runIds.every((r) => this.settled(r)))) return this.stop();
@@ -189,6 +192,8 @@ export class Session {
     }, ms);
   }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
+  /** Stop for good (session evicted): new work no longer restarts the clock. */
+  close() { this.ms = 0; this.stop(); }
 
   settled(runId: string) {
     const s = this.hub.state(runId);
