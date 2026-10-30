@@ -10,6 +10,8 @@ import { decide, fold, reduce, INPUTS, startContext } from '../src/engine.ts';
 import type { Ev, RunState } from '../src/engine.ts';
 import { runMetrics } from '../src/metrics.ts';
 
+process.env.KEEL_PLANNER = 'search'; // deterministic search only; recorded model output is covered in g5-planner.test.ts
+
 const run = (scenario: string, policies: ('keel' | 'static' | 'naive')[], hub = new Hub()) => {
   const s = new Session(hub, scenario, scenario, policies).start().runToEnd();
   return { hub, s };

@@ -9,6 +9,8 @@ import { scenarios } from '../src/scenarios.ts';
 import { decide, fold, startContext } from '../src/engine.ts';
 import type { Ev } from '../src/engine.ts';
 
+process.env.KEEL_PLANNER = 'search'; // deterministic search only; recorded model output is covered in g5-planner.test.ts
+
 const D = scenarios.delivery;
 const obs = (o: Omit<Observation, 'sig'>, key = D.sources[o.source]?.key ?? 'x'): Observation => ({ ...o, sig: sign(o, key) });
 const ctx = (f: Record<string, unknown>, done: string[] = []): Ctx => ({ f: f as Ctx['f'], done: new Set(done), unstable: new Set(), active: [] });

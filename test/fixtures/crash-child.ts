@@ -2,6 +2,7 @@
 import { Hub, Session } from '../../src/runner.ts';
 import { runMetrics } from '../../src/metrics.ts';
 
+process.env.KEEL_PLANNER = 'search';
 const [db, mode] = process.argv.slice(2);
 const hub = new Hub(db);
 if (mode === 'run') {

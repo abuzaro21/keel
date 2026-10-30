@@ -58,7 +58,8 @@ export function parseModelResponse(text: string): { rationale: string; steps: Dr
 export class Planner {
   recordings: Recording[];
   constructor(file = new URL('../fixtures/planner-recordings.json', import.meta.url)) {
-    this.recordings = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) as Recording[] : [];
+    // KEEL_PLANNER=search disables recorded model output (engine tests stay independent of fixture contents).
+    this.recordings = process.env.KEEL_PLANNER !== 'search' && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) as Recording[] : [];
   }
 
   /** Recorded genuine model output for exactly this planning context, if one was captured. */

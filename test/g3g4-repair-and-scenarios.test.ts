@@ -11,6 +11,8 @@ import { sign } from '../src/world.ts';
 import type { Observation } from '../src/world.ts';
 import { Planner } from '../src/planner.ts';
 
+process.env.KEEL_PLANNER = 'search'; // deterministic search only; recorded model output is covered in g5-planner.test.ts
+
 const D = scenarios.delivery;
 const variant = (id: string, base: Scenario, patch: Partial<Scenario>) => { scenarios[id] = { ...base, id, ...patch }; return id; };
 const authority = (eventId: string, fact: string, value: string, at: number, seq: number, source = 'traffic-authority'): Observation => {
