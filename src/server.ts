@@ -16,6 +16,9 @@ import type { Json } from './model.ts';
 
 export const TICK_MS = Number(process.env.KEEL_TICK_MS ?? 900);
 const MAX_SESSIONS = 40;
+const MAX_STREAMS_PER_SESSION = 8;
+const MAX_STREAMS = 200;
+const MAX_INJECTIONS_PER_SESSION = 60;
 const PUBLIC = new URL('../public/', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 
 /** Which observations a visitor may inject. The server signs as the named source; the browser never holds a key. */
@@ -73,6 +76,9 @@ export function startServer(port = Number(process.env.PORT ?? 3000), dbPath = pr
   const hub = new Hub(dbPath);
   const streams = new Map<string, Set<ServerResponse>>();
   const created: { at: number; ip: string }[] = [];
+  const injections = new Map<string, number>();
+  // Behind Render's proxy every socket comes from the proxy; the first forwarded address is the client (spoofable, so a global cap backs it).
+  const clientOf = (req: IncomingMessage) => String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.socket.remoteAddress || '?';
 
   hub.listeners.add((rows: Row[]) => {
     const session = rows[0] && hub.store.runs().find((r) => r.runId === rows[0].runId)?.session;
@@ -107,10 +113,10 @@ export function startServer(port = Number(process.env.PORT ?? 3000), dbPath = pr
         if (!injectable[scenario]) return json(res, 400, { error: 'unknown scenario' });
         const pols = (Array.isArray(body.policies) ? body.policies : scenario === 'flapping' ? ['naive', 'keel'] : ['static', 'keel']).map(String) as PolicyName[];
         if (!pols.length || pols.length > 3 || pols.some((x) => !policies[x])) return json(res, 400, { error: 'bad policies' });
-        const ip = req.socket.remoteAddress ?? '?';
+        const ip = clientOf(req);
         const now = Date.now();
         while (created.length && now - created[0].at > 60_000) created.shift();
-        if (created.filter((c) => c.ip === ip).length >= 12) return json(res, 429, { error: 'too many sessions; wait a minute' });
+        if (created.filter((c) => c.ip === ip).length >= 12 || created.length >= 120) return json(res, 429, { error: 'too many new runs; wait a minute' });
         if (hub.sessions.size >= MAX_SESSIONS) evictOldest(hub);
         created.push({ at: now, ip });
         const s = new Session(hub, randomUUID().slice(0, 8), scenario, pols).start();
@@ -123,11 +129,18 @@ export function startServer(port = Number(process.env.PORT ?? 3000), dbPath = pr
         if (!s) return json(res, 404, { error: 'no such session (sessions are in memory; the demo host may have restarted)' });
         const action = m[2];
         if (!action && req.method === 'GET') return json(res, 200, { sessionId: s.id, scenario: s.scenario, tick: s.tick, runs: s.runIds.map((r) => runView(hub, r)) });
-        if (action === 'stream') return stream(req, res, hub, s, streams);
+        if (action === 'stream') {
+          const total = [...streams.values()].reduce((n, x) => n + x.size, 0);
+          if ((streams.get(s.id)?.size ?? 0) >= MAX_STREAMS_PER_SESSION || total >= MAX_STREAMS) return json(res, 429, { error: 'too many open streams' });
+          return stream(req, res, hub, s, streams);
+        }
         if (action === 'export') return json(res, 200, { sessionId: s.id, runs: s.runIds.map((r) => ({ runId: r, events: hub.store.rows(r), effects: hub.sim.effects(r) })) });
         if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
         const body = await readJson(req);
         if (action === 'inject') {
+          const used = injections.get(s.id) ?? 0;
+          if (used >= MAX_INJECTIONS_PER_SESSION) return json(res, 429, { error: 'injection limit for this run reached; start a new run' });
+          injections.set(s.id, used + 1);
           const allowed = injectable[s.scenario].find((x) => x.fact === body.fact && x.values.includes(body.value as Json));
           if (!allowed) return json(res, 400, { error: 'that observation is not injectable here' });
           const src = scenarios[s.scenario].sources[allowed.source];
@@ -153,7 +166,9 @@ export function startServer(port = Number(process.env.PORT ?? 3000), dbPath = pr
       if (req.method === 'GET') return serveStatic(res, p);
       json(res, 404, { error: 'not found' });
     } catch (e) {
-      json(res, 500, { error: (e as Error).message });
+      if (e instanceof SyntaxError || (e as Error).message === 'body too large') return json(res, 400, { error: 'bad request body' });
+      console.error(e);
+      json(res, 500, { error: 'internal error' });
     }
   });
   server.listen(port);

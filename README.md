@@ -19,7 +19,7 @@ npm start          # http://localhost:3000
 Requires Node **24.13+** (uses built-in `node:sqlite` and TypeScript type stripping; zero runtime npm dependencies).
 
 ```bash
-npm test           # 35 engine tests incl. real SIGKILL crash recovery
+npm test           # 49 tests: engine, durability (real SIGKILL), repair, scenarios, regressions, server
 npm run typecheck
 npx playwright install chromium && npx playwright test   # browser tests (desktop + phone)
 ```
