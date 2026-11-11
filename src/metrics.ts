@@ -32,7 +32,9 @@ export async function runMetrics(store: Store, sim: Sim, runId: string): Promise
   const evs = rows.map((r) => r.ev);
   const revs = evs.flatMap((e) => (e.t === 'revision' ? [e.record as RevisionRecord] : []));
   const session = sim.sessionFor(runId);
-  const lastTick = Math.max(rows.at(-1)!.tick, await store.clock(session));
+  // Judged only through ticks whose work has run (the persisted clock), never through a tick still in progress:
+  // a success published here cannot be undone by a world change stamped at that tick.
+  const lastTick = await store.clock(session);
   const out = sim.outcome(runId, S, lastTick);
   const effects = sim.effects(runId);
   const keys = effects.map((e) => contract(S.domain, e.action).effectKey(e.params));

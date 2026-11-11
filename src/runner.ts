@@ -334,13 +334,14 @@ export class Session {
 
   async advanceClock() {
     this.tick++;
-    await this.hub.store.setClock(this.id, this.tick);
-    for (const l of this.hub.tickListeners) l(this);
   }
 
   async runDue() {
     while (!this.closed && this.queue.length && this.queue[0].tick <= this.tick) await this.queue.shift()!.fn();
     this.ran = this.tick;
+    // The persisted clock is the judged watermark: outcomes are reported only through ticks whose work has run.
+    await this.hub.store.setClock(this.id, this.tick);
+    for (const l of this.hub.tickListeners) l(this); // viewers get the verdict through this tick
   }
 
   /** Virtual time: advance tick by tick until nothing is left or `maxTick`. Deterministic. */

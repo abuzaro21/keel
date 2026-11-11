@@ -103,7 +103,7 @@ test('C: a frame that fails to build closes the stream; the reconnect backfills 
     hub.sessions.get = (k: string) => { if (fail) { fail = false; throw new Error('injected payload failure'); } return get(k); };
     let armed = false;
     const first = await frames(url, '', (f) => {
-      if (f.length && !armed) { armed = true; fail = true; void sess.advanceClock(); } // the tick broadcast builds a frame
+      if (f.length && !armed) { armed = true; fail = true; void sess.runDue(); } // the end-of-tick broadcast builds a frame
       return false;
     });
     assert.ok(first.closed, 'the server closed the stream instead of skipping rows');

@@ -145,7 +145,7 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
         if (!admit()) throw new BusyError();
         let s: Session;
         try { s = await Session.resume(hub, id); } finally { reserved--; }
-        if (!s.runIds.every((r) => s.settled(r))) s.play(TICK_MS);
+        s.play(TICK_MS); // also when every lane is settled: scheduled world events may still be due; play stops when none are
         return s;
       })().finally(() => loading.delete(id));
       loading.set(id, p);

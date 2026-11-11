@@ -1,5 +1,5 @@
-// Regressions for release verification rounds 4 and 5 (Codex gpt-6.1-sol): a scheduled observation after an injection is
-// not stale, an injection waits for the clock and never lands on a judged tick, and request quotas survive an unload.
+// Regressions for release verification rounds 4 to 6 (Codex gpt-6.1-sol): sequence numbers, the session lock, injections
+// never landing on a judged tick, verdicts judged only through ticks whose work has run, quotas and clocks across a reload.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -88,5 +88,38 @@ test('an injection after the run has settled cannot rewrite its judged outcome',
     assert.equal((await post(`${base}/api/sessions/${sessionId}/inject`, { fact: 'route:R2.status', value: 'closed' })).status, 202);
     assert.ok(hub.sim.injections(sessionId)[0].tick > settledAt, 'the change happens after the judged tick');
     assert.deepEqual(await goal(), before, 'outcomes unchanged');
+  });
+});
+
+test('a verdict changes only when a tick\'s work has run, so a world change at that tick cannot undo it', async () => {
+  const { runView } = await import('../src/server.ts');
+  await withServer(async (base, hub) => {
+    const { sessionId, runIds } = await (await post(`${base}/api/sessions`, { scenario: 'delivery', policies: ['keel'] })).json();
+    const s = hub.sessions.get(sessionId)!;
+    const verdict = async () => { const m = (await runView(hub, runIds[0])).metrics; return { met: m.goalMet, pending: m.outcomePending }; };
+    await s.exclusive(() => s.runDue());
+    let prev = await verdict();
+    while (s.tick < 40 && !(prev.met && !prev.pending)) {
+      await s.exclusive(() => s.advanceClock());
+      assert.deepEqual(await verdict(), prev, `t${s.tick}: unchanged before the tick's work runs`);
+      await s.exclusive(() => s.runDue());
+      prev = await verdict();
+    }
+    assert.deepEqual(prev, { met: true, pending: false }, 'KEEL delivers');
+  });
+});
+
+test('a reloaded session whose lanes are all paused still delivers its scheduled world events', async () => {
+  await withServer(async (base, hub) => {
+    const { sessionId } = await (await post(`${base}/api/sessions`, { scenario: 'flapping' })).json();
+    const s = hub.sessions.get(sessionId)!;
+    const state = s as unknown as { queue: unknown[]; timer: unknown };
+    await s.exclusive(() => s.runDue());
+    while (s.tick < 40 && !(s.runIds.every((r) => s.settled(r)) && state.queue.length)) { await s.exclusive(() => s.advanceClock()); await s.exclusive(() => s.runDue()); }
+    assert.ok(state.queue.length, 'paused lanes with world events still due');
+    for (let e; (e = evictOldest(hub, new Map())); ) await e.done;
+    assert.equal((await fetch(`${base}/api/sessions/${sessionId}`)).status, 200);
+    const again = hub.sessions.get(sessionId)! as unknown as { queue: unknown[]; timer: unknown };
+    assert.ok(again.queue.length && again.timer, 'the reloaded clock runs');
   });
 });
