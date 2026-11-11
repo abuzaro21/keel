@@ -9,7 +9,7 @@ Status: **not submitted.** Submission and the video upload are owner decisions. 
 | Project | KEEL: *The plan can change. The goal stays.* |
 | One line | An agent that notices which of its assumptions a change broke, repairs only that part of its plan, keeps the work already done, and stops when the world is too unstable to trust. |
 | Repository | https://github.com/abuzaro21/keel (public), release tag `v1.0.0` (`7541de0`) |
-| Hosted demo | https://keel-1myw.onrender.com (Render free web service + free Postgres 16, Frankfurt; deployed `main` `9cd55c5` = `v1.0.0` + region line in `render.yaml`). Free instance sleeps after 15 min idle (~1 min cold start); the free database expires 2026-12-11. Evidence: [evidence/hosted-render.txt](evidence/hosted-render.txt) |
+| Hosted demo | https://keel-1myw.onrender.com (Render free web service + free Postgres 16, Frankfurt; deployed `main` `e35922c` = `v1.0.0` + region line in `render.yaml` + security headers on every JSON response). Free instance sleeps after 15 min idle (~1 min cold start); the free database expires 2026-12-11. Evidence: [evidence/hosted-render.txt](evidence/hosted-render.txt) |
 | Video | `film/out/keel-film-final.mp4` (89.9 s, 1920x1080, 30 fps, H.264/AAC, burned-in captions, closing logo reveal) + `film/keel-film.srt`; built by `film/build.mjs`; git-ignored; not uploaded. Narration checked by ASR, not yet by a human listener ([storyboard](../film/storyboard.md#automated-audio-and-picture-checks-2026-11-11)) |
 | Thesis | [THESIS.md](THESIS.md) (266 words) |
 | Failure test | [FAILURE-TEST.md](FAILURE-TEST.md) |

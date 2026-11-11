@@ -3,7 +3,7 @@
 **Deployed 2026-11-11** (owner-authorized, free plans only): https://keel-1myw.onrender.com. Workspace **KEEL**, Blueprint
 `exs-dbpuomu7bikc73bg4ugg` (`render.yaml` on `main`, auto-sync off), web service `srv-dbpuqijrjlhs73b67h60` (free, Frankfurt,
 Docker), Postgres `keel-db` `dpg-dbptb61srm7s738qgokg-a` (free, PG 16, Frankfurt, **expires 2026-12-11**). Auto-deploy is off:
-a new release is deployed by a manual deploy. Checks: [evidence/hosted-render.txt](evidence/hosted-render.txt). The steps below
+a new release is deployed by a manual deploy (current: `main` `e35922c`). Checks: [evidence/hosted-render.txt](evidence/hosted-render.txt). The steps below
 are how it was set up.
 
 ## What gets created
