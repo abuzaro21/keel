@@ -351,7 +351,7 @@ const SECURITY_HEADERS = {
 };
 
 function json(res: ServerResponse, code: number, body: unknown) {
-  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  res.writeHead(code, { ...SECURITY_HEADERS, 'content-type': 'application/json', 'cache-control': 'no-store' }); // every response, including the 404 before the UI is built
   res.end(JSON.stringify(body));
 }
 
