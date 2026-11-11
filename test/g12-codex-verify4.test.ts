@@ -1,5 +1,5 @@
-// Regressions for release verification round 4 (Codex gpt-6.1-sol): a scheduled observation after an injection is not
-// stale, an injection cannot be overtaken by the clock while it persists, and request quotas survive an unload.
+// Regressions for release verification rounds 4 and 5 (Codex gpt-6.1-sol): a scheduled observation after an injection is
+// not stale, an injection waits for the clock and never lands on a judged tick, and request quotas survive an unload.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -74,3 +74,19 @@ test('request quotas survive eviction and reload, and live only on the resident 
   });
 });
 
+
+test('an injection after the run has settled cannot rewrite its judged outcome', async () => {
+  const { runView } = await import('../src/server.ts');
+  await withServer(async (base, hub) => {
+    const { sessionId, runIds } = await (await post(`${base}/api/sessions`, { scenario: 'delivery', policies: ['static', 'keel'] })).json();
+    const s = hub.sessions.get(sessionId)!;
+    await s.runToEnd();
+    const settledAt = s.tick;
+    const goal = async () => Promise.all(runIds.map(async (r: string) => (await runView(hub, r)).metrics.goalMet));
+    const before = await goal();
+    assert.deepEqual(before, [false, true], 'static fails, KEEL delivers');
+    assert.equal((await post(`${base}/api/sessions/${sessionId}/inject`, { fact: 'route:R2.status', value: 'closed' })).status, 202);
+    assert.ok(hub.sim.injections(sessionId)[0].tick > settledAt, 'the change happens after the judged tick');
+    assert.deepEqual(await goal(), before, 'outcomes unchanged');
+  });
+});

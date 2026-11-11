@@ -211,6 +211,8 @@ export class Session {
     this.lock = job.catch(() => {});
     return job;
   }
+  /** Last tick whose due work has run. A world change never lands on it: outcomes up to that tick are already judged. */
+  private ran = -1;
   /** Request quotas, restored from the store on resume so an unload or restart never resets them. */
   injectionsUsed = 0;
   commandsUsed = 0;
@@ -270,6 +272,7 @@ export class Session {
     const s = new Session(hub, id, runs[0].scenario, runs.map((r) => r.policy as PolicyName));
     const lastRowTick = Math.max(0, ...(await Promise.all(runs.map(async (r) => (await hub.store.rows(r.runId)).at(-1)?.tick ?? 0))));
     s.tick = Math.max(lastRowTick, await hub.store.clock(id));
+    s.ran = s.tick; // conservatively: its work may have run before the restart
     for (const r of runs) {
       await hub.load(r.runId, id);
       const rows = await hub.store.rows(r.runId);
@@ -318,6 +321,7 @@ export class Session {
   injectShared(i: Injection | (() => Injection)): Promise<Injection> {
     return this.exclusive(async () => {
       if (this.closed) throw new SessionClosedError(this.id);
+      if (this.ran >= this.tick) await this.advanceClock(); // e.g. a settled clock: the change happens at the next tick
       const inj = typeof i === 'function' ? i() : i;
       await this.hub.sim.addInjection(this.id, inj);
       await this.injectAll(inj.obs);
@@ -336,6 +340,7 @@ export class Session {
 
   async runDue() {
     while (!this.closed && this.queue.length && this.queue[0].tick <= this.tick) await this.queue.shift()!.fn();
+    this.ran = this.tick;
   }
 
   /** Virtual time: advance tick by tick until nothing is left or `maxTick`. Deterministic. */
