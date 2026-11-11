@@ -5,7 +5,7 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { Hub, Session, SessionClosedError } from './runner.ts';
+import { Hub, Session, SessionClosedError, SEQ_TICK } from './runner.ts';
 import type { Row } from './store.ts';
 import { FencedError } from './store.ts';
 import { scenarios } from './scenarios.ts';
@@ -109,8 +109,6 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
   const hub = await Hub.open(target);
   const streams = new Map<string, Set<Conn>>();
   const created: { at: number; ip: string }[] = [];
-  const injections = new Map<string, number>();
-  const commands = new Map<string, number>();
   let lastPrune = 0;
   const prune = async () => {
     if (Date.now() - lastPrune < 10 * 60_000) return;
@@ -238,11 +236,10 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
         if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
         const body = await readJson(req);
         if (action === 'inject') {
-          const used = injections.get(s.id) ?? 0;
-          if (used >= MAX_INJECTIONS_PER_SESSION) return json(res, 429, { error: 'injection limit for this run reached; start a new run' });
+          if (s.injectionsUsed >= MAX_INJECTIONS_PER_SESSION) return json(res, 429, { error: 'injection limit for this run reached; start a new run' });
           const allowed = injectable[s.scenario].find((x) => x.fact === body.fact && x.values.includes(body.value as Json));
           if (!allowed) return json(res, 400, { error: 'that observation is not injectable here' });
-          injections.set(s.id, used + 1);
+          s.injectionsUsed++;
           const src = scenarios[s.scenario].sources[allowed.source];
           const forged = !!body.forged;
           // Built inside the session's injection queue, so two concurrent requests never share a sequence number.
@@ -251,31 +248,30 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
             const seqs = s.runIds.map((r) => hub.state(r)?.world.lastSeq[`${src.id}|${allowed.fact}`] ?? 0);
             // Agent state can be missing while a lane rebuilds after a crash; the session's injection cache never is.
             const prior = hub.sim.injections(s.id).filter((x) => x.obs.source === src.id && x.obs.fact === allowed.fact).map((x) => x.obs.seq);
-            const o = { eventId: `inj-${randomUUID().slice(0, 12)}`, source: src.id, seq: Math.max(...seqs, ...prior, 1000 + s.tick) + 1, fact: allowed.fact, value: body.value as Json, observedAt: s.tick };
+            const o = { eventId: `inj-${randomUUID().slice(0, 12)}`, source: src.id, seq: Math.max(...seqs, ...prior, s.tick * SEQ_TICK + 500) + 1, fact: allowed.fact, value: body.value as Json, observedAt: s.tick };
             return { tick: s.tick, fact: allowed.fact, value: body.value as Json, real: !forged, obs: { ...o, sig: forged ? sign(o, 'visitor-forgery') : sign(o, src.key) } };
           });
           return json(res, 202, { eventId: inj.obs.eventId, forged });
         }
         const runId = String(body.runId ?? '');
         if (!s.runIds.includes(runId)) return json(res, 400, { error: 'unknown run' });
-        const usedCmd = commands.get(s.id) ?? 0;
-        if (usedCmd >= MAX_COMMANDS_PER_SESSION) return json(res, 429, { error: 'command limit for this run reached; start a new run' });
-        commands.set(s.id, usedCmd + 1);
+        if (s.commandsUsed >= MAX_COMMANDS_PER_SESSION) return json(res, 429, { error: 'command limit for this run reached; start a new run' });
+        s.commandsUsed++;
         if (action === 'operator') {
           const cmd = String(body.cmd);
           if (!['resume', 'abort', 'confirm'].includes(cmd)) return json(res, 400, { error: 'bad command' });
           const fact = String(body.fact);
           // Evaluated inside the run's mailbox, after every observation queued before it: a confirmation adopts the value
           // that is current at that moment (the browser cannot choose one), and is refused if the fact is no longer unstable.
-          const ok = await hub.submitFrom(runId, (st) => {
+          const ok = await s.exclusive(() => hub.submitFrom(runId, (st) => {
             if (cmd !== 'confirm') return { t: 'operator', cmd: cmd as 'resume', at: s.tick };
             if (!st?.world.unstable.includes(fact)) return null;
             return { t: 'operator', cmd: 'confirm', fact, value: st.world.facts[fact], at: s.tick };
-          }, s);
+          }, s));
           if (!ok) return json(res, 409, { error: 'only an unstable fact can be confirmed' });
           return json(res, 202, { ok: true });
         }
-        if (action === 'crash') { await hub.crashAndRecover(runId, s); return json(res, 202, { ok: true }); }
+        if (action === 'crash') { await s.exclusive(() => hub.crashAndRecover(runId, s)); return json(res, 202, { ok: true }); }
       }
       if (req.method === 'GET') return serveStatic(res, p);
       json(res, 404, { error: 'not found' });

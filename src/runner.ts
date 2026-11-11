@@ -22,13 +22,20 @@ import { Planner } from './planner.ts';
 type Task = { tick: number; pri: number; seq: number; runId: string | null; fn: () => Promise<void> | void };
 export type Listener = (rows: Row[]) => void;
 
+/**
+ * One sequence space per tick, so a later observation always outranks an earlier one on the same source/fact lane:
+ * scheduled feed items take tick*1000 + 1.., world reports tick*1000 + 400.., visitor injections tick*1000 + 500..
+ * (truth applies a visitor change after the scheduled change of the same tick, so the agent's belief order matches).
+ * ponytail: 400 feed items per source and 500 reports or injections per tick and lane; widen SEQ_TICK if a scenario grows.
+ */
+export const SEQ_TICK = 1000;
 /** Turn a scenario feed into signed observations. Identical objects go to every policy's run. */
 export function feedObservations(S: Scenario): { tick: number; obs: Observation }[] {
   const seq: Record<string, number> = {};
   const out: { tick: number; obs: Observation }[] = [];
   S.feed.forEach((f: FeedItem, i) => {
     if (f.replayOf !== undefined) { out.push({ tick: f.tick, obs: out[f.replayOf].obs }); return; } // duplicate delivery
-    const n = f.seq ?? (seq[f.source] = (seq[f.source] ?? 0) + 1);
+    const n = f.seq ?? f.tick * SEQ_TICK + (seq[f.source] = (seq[f.source] ?? 0) + 1); // an explicit seq (e.g. a deliberately stale 0) is kept
     const body = { eventId: `${S.id}-e${i + 1}`, source: f.source, seq: n, fact: f.fact, value: f.value, observedAt: f.tick };
     const key = S.sources[f.source]?.key ?? 'unregistered';
     out.push({ tick: f.tick, obs: { ...body, sig: f.forged ? sign(body, 'attacker-guess') : sign(body, key) } });
@@ -194,8 +201,19 @@ export class Session {
   private n = 0;
   private timer: NodeJS.Timeout | null = null;
   private busy = false;
-  /** The clock iteration in progress (eviction waits for it before dropping caches). */
-  private ticking: Promise<void> = Promise.resolve();
+  /**
+   * Clock iterations, injections, operator commands and crashes of one session run one at a time. Every effect executes
+   * against a settled simulated world, and an injection is stamped, persisted and delivered at one tick that cannot move.
+   */
+  private lock: Promise<unknown> = Promise.resolve();
+  exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const job = this.lock.then(fn);
+    this.lock = job.catch(() => {});
+    return job;
+  }
+  /** Request quotas, restored from the store on resume so an unload or restart never resets them. */
+  injectionsUsed = 0;
+  commandsUsed = 0;
   closed = false;
   /** Fully loaded (started or resumed). Only a ready session may be evicted: closing one mid-start would leave a run without its start event. */
   ready = false;
@@ -217,7 +235,7 @@ export class Session {
     if (hub.fenced) throw hub.fenced;
     const s = new Session(hub, id, scenario, policyNames);
     hub.sessions.set(id, s); // its own start-up inputs need it reachable (presentation looks up the clock)
-    try { await s.start(); } catch (e) { hub.sessions.delete(id); throw e; }
+    try { await s.exclusive(() => s.start()); } catch (e) { hub.sessions.delete(id); throw e; }
     s.ready = true;
     return s;
   }
@@ -254,7 +272,10 @@ export class Session {
     s.tick = Math.max(lastRowTick, await hub.store.clock(id));
     for (const r of runs) {
       await hub.load(r.runId, id);
-      const delivered = (await hub.store.rows(r.runId)).flatMap((x) => (x.ev.t === 'observation' ? [x.ev.obs.eventId] : []));
+      const rows = await hub.store.rows(r.runId);
+      // Conservative: a recovery after a restart counts like a crash request.
+      s.commandsUsed += rows.filter((x) => x.ev.t === 'operator' || x.ev.t === 'recover').length;
+      const delivered = rows.flatMap((x) => (x.ev.t === 'observation' ? [x.ev.obs.eventId] : []));
       const deliver = (tick: number, obs: Observation) => {
         const i = delivered.indexOf(obs.eventId);
         if (i >= 0) { delivered.splice(i, 1); return; }
@@ -266,6 +287,7 @@ export class Session {
       const st = hub.state(r.runId);
       if (st && st.status !== 'completed' && st.status !== 'stopped') await hub.submit(r.runId, { t: 'recover', at: s.tick }, s);
     }
+    s.injectionsUsed = hub.sim.injections(id).length;
     s.ready = true;
     hub.sessions.set(id, s); // published only now: a concurrent request never sees a half-loaded session
     return s;
@@ -282,7 +304,7 @@ export class Session {
       this.reported.add(eventId);
       if (alreadyDelivered.includes(eventId)) return;
       this.schedule(Math.max(r.tick, this.tick), 0, null, () => {
-        const body = { eventId, source: r.source, seq: this.tick + 1, fact: r.fact, value: r.value(truthAt), observedAt: this.tick };
+        const body = { eventId, source: r.source, seq: this.tick * SEQ_TICK + 400 + i, fact: r.fact, value: r.value(truthAt), observedAt: this.tick };
         return this.inject(runId, { ...body, sig: sign(body, S.sources[r.source].key) });
       });
     });
@@ -290,20 +312,17 @@ export class Session {
 
   /**
    * A visitor injection: persisted first (with its signed envelope), then delivered to every lane. Recovery re-delivers
-   * missing copies. Injections of one session are strictly serialised, so persisted order == simulated-truth order ==
-   * delivery order, and a builder sees the sequence numbers every earlier injection already consumed.
+   * missing copies. Runs under the session lock, so persisted order == simulated-truth order == delivery order, a builder
+   * sees the sequence numbers every earlier injection already consumed, and no clock tick or effect slips in between.
    */
-  private injecting: Promise<unknown> = Promise.resolve();
   injectShared(i: Injection | (() => Injection)): Promise<Injection> {
-    const job = this.injecting.then(async () => {
+    return this.exclusive(async () => {
       if (this.closed) throw new SessionClosedError(this.id);
       const inj = typeof i === 'function' ? i() : i;
       await this.hub.sim.addInjection(this.id, inj);
       await this.injectAll(inj.obs);
       return inj;
     });
-    this.injecting = job.catch(() => {});
-    return job;
   }
 
   inject(runId: string, obs: Observation) { return this.hub.submit(runId, { t: 'observation', obs, at: this.tick }, this); }
@@ -322,9 +341,13 @@ export class Session {
   /** Virtual time: advance tick by tick until nothing is left or `maxTick`. Deterministic. */
   async runToEnd(maxTick = 80) {
     while (this.tick <= maxTick) {
-      await this.runDue();
-      if (!this.queue.length && this.runIds.every((r) => this.settled(r))) break;
-      await this.advanceClock();
+      const done = await this.exclusive(async () => {
+        await this.runDue();
+        if (!this.queue.length && this.runIds.every((r) => this.settled(r))) return true;
+        await this.advanceClock();
+        return false;
+      });
+      if (done) break;
     }
     return this;
   }
@@ -336,13 +359,13 @@ export class Session {
     this.timer = setInterval(() => {
       if (this.busy) return;
       this.busy = true;
-      this.ticking = (async () => {
+      void this.exclusive(async () => {
         try {
           await this.runDue();
           if ((this.tick >= maxTick) || (!this.queue.length && this.runIds.every((r) => this.settled(r)))) return this.stop();
           await this.advanceClock();
         } catch (e) { console.error(`session ${this.id}:`, e); this.stop(); } finally { this.busy = false; }
-      })();
+      });
     }, ms);
   }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
@@ -350,8 +373,7 @@ export class Session {
   close() { this.closed = true; this.ms = 0; this.stop(); }
   /** Resolves once nothing of this (closed) session can still touch its runs' caches. */
   async quiesce() {
-    await this.ticking;
-    await this.injecting;
+    await this.lock;
     await this.hub.drain(this.runIds);
   }
 

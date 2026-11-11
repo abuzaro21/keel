@@ -206,9 +206,9 @@ test('oscillation guard: flipping back to an abandoned plan with no progress in 
   const st = hub.state('osc-keel')!;
   assert.equal(st.plan.version, 2);
   assert.equal(st.ledger[st.inflight!].action, 'label', 'label(R2) is preparing');
-  await s.inject('osc-keel', authority('o1', 'route:R2.status', 'closed', 7, 10));
+  await s.inject('osc-keel', authority('o1', 'route:R2.status', 'closed', 7, 7600));
   assert.ok((await events(hub, 'osc-keel')).some((e) => e.t === 'fenced'));
-  await s.inject('osc-keel', authority('o2', 'route:R1.status', 'open', 7, 11));
+  await s.inject('osc-keel', authority('o2', 'route:R1.status', 'open', 7, 7601));
   const p = (await events(hub, 'osc-keel')).filter((e) => e.t === 'paused').at(-1);
   assert.ok(p && p.t === 'paused' && p.kind === 'oscillation', JSON.stringify(p));
 });

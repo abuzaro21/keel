@@ -62,7 +62,8 @@ test('R1-5: an operator confirmation adopts the value current when it is process
   const fact = st.world.unstable[0];
   assert.ok(fact, 'flapping leaves an unstable fact');
   const flipped = st.world.facts[fact] === 'open' ? 'closed' : 'open';
-  const body = { eventId: 'late', source: 'traffic-authority', seq: 5000, fact, value: flipped, observedAt: s.tick };
+  const body = { eventId: 'late', source: 'traffic-authority', seq: s.tick * 1000 + 999, // newest in this tick
+    fact, value: flipped, observedAt: s.tick };
   // Not awaited: the observation is still in the mailbox when the confirmation is enqueued.
   const obs = hub.submit('c-keel', { t: 'observation', obs: { ...body, sig: sign(body, scenarios.flapping.sources['traffic-authority'].key) }, at: s.tick }, s);
   const conf = hub.submitFrom('c-keel', (x) => (x?.world.unstable.includes(fact) ? { t: 'operator', cmd: 'confirm', fact, value: x.world.facts[fact], at: s.tick } : null), s);
