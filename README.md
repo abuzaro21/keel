@@ -19,8 +19,8 @@ npm start          # http://localhost:3000
 Requires Node **24.13+** (built-in `node:sqlite` and TypeScript type stripping). One runtime dependency: `pg`, used only when `DATABASE_URL` points at Postgres.
 
 ```bash
-npm test           # 73 tests: engine, durability (real SIGKILL), repair, scenarios, store, fencing, server, regressions
-KEEL_TEST_DATABASE_URL=postgres://user:pass@host:5432/db npm test   # the same 73 tests on PostgreSQL
+npm test           # 74 tests: engine, durability (real SIGKILL), repair, scenarios, store, fencing, server, regressions
+KEEL_TEST_DATABASE_URL=postgres://user:pass@host:5432/db npm test   # the same 74 tests on PostgreSQL
 npm run typecheck
 npx playwright install chromium && npx playwright test   # browser tests (desktop + phone)
 ```
@@ -54,7 +54,7 @@ The engine is a pure, event-sourced function: `decide(state, input) → decision
 
 - **Inside the product.** A language model proposes repair candidates. The public demo uses **recorded genuine outputs** of `claude-sonnet-5-5` (captured with `scripts/record-planner.ts` through the Claude Code CLI; serving model taken from CLI metadata; prompt and response stored with sha256 in `fixtures/planner-recordings.json`). A recording is used only when the full planning context hashes identically; it is then **validated against the live run like any other candidate** and labelled "recorded model output · validated now". Any change a visitor injects produces a new context and falls back to the labelled deterministic search. Replayed outputs are never presented as fresh inference. No API key is needed; there is no live-model mode in this release.
   - Observed: in the flapping scenario the model proposed obtaining the reversible permit *before* the irreversible packing step — a valid reordering the deterministic search does not produce.
-- **Building it.** Designed and implemented by Claude (Anthropic, Claude Code) with OpenAI Codex (`gpt-6.1-sol`) as independent co-architect and adversarial reviewer: independent architectures, cross-examination, and code-level gate reviews that found real defects (six review rounds found 14, 3, 4, 3, 3 and 3 issues; each fix has a regression test in `test/g8-*` to `test/g12-*`). The owner directed the work and makes the release decisions.
+- **Building it.** Designed and implemented by Claude (Anthropic, Claude Code) with OpenAI Codex (`gpt-6.1-sol`) as independent co-architect and adversarial reviewer: independent architectures, cross-examination, and code-level gate reviews that found real defects (seven review rounds found 14, 3, 4, 3, 3, 3 and 1 issues; each fix has a regression test in `test/g8-*` to `test/g12-*`). The owner directed the work and makes the release decisions.
 - **The film.** Every UI frame is a real screen capture of this build (`film/capture.mjs`); edits are cuts, crops and on-screen-labelled speed changes. The narration is a synthetic voice (Kokoro-82M, run locally); the music is synthesised by ffmpeg. See [film/storyboard.md](film/storyboard.md).
 
 ## Limitations (stated, not hidden)

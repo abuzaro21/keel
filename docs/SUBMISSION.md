@@ -29,12 +29,12 @@ Status: **not submitted.** Submission, public visibility, the hosted URL and the
 
 | Check | Result | Log |
 |---|---|---|
-| Test suite on SQLite | 73 / 73 | [evidence/test-sqlite.txt](evidence/test-sqlite.txt) |
-| Same suite on PostgreSQL 16 | 73 / 73 | [evidence/test-postgres.txt](evidence/test-postgres.txt) |
+| Test suite on SQLite | 74 / 74 | [evidence/test-sqlite.txt](evidence/test-sqlite.txt) |
+| Same suite on PostgreSQL 16 | 74 / 74 | [evidence/test-postgres.txt](evidence/test-postgres.txt) |
 | Browser tests, desktop + phone | 10 / 10 | [evidence/test-e2e.txt](evidence/test-e2e.txt) |
 | SIGKILL + resume + takeover, Docker on Postgres | 0 duplicate effects; old instance 503 | [evidence/hosted-check.txt](evidence/hosted-check.txt) |
 | `npm audit --omit=dev` | 0 vulnerabilities | local run; CI job |
-| Independent review (Codex gpt-6.1-sol) | 6 rounds: 14, 3, 4, 3, 3, 3 findings; all fixed with regression tests | `test/g8-*` to `test/g12-*` |
+| Independent review (Codex gpt-6.1-sol) | 7 rounds: 14, 3, 4, 3, 3, 3, 1 findings; all fixed with regression tests | `test/g8-*` to `test/g12-*` |
 
 ## Honesty notes for the form
 
