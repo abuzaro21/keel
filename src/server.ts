@@ -106,14 +106,22 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
 
   /** A session from memory, or reloaded from the store (e.g. after a restart) and resumed if still in progress. */
   const loading = new Map<string, Promise<Session | null>>();
-  const getSession = (id: string): Promise<Session | null> => {
+  const evicting = new Map<string, Promise<void>>();
+  const evict = () => {
+    const p = evictOldest(hub, streams);
+    if (!p) return;
+    evicting.set(p.id, p.done);
+    void p.done.finally(() => evicting.delete(p.id));
+  };
+  const getSession = async (id: string): Promise<Session | null> => {
+    await evicting.get(id); // never reload a session while its caches are still being torn down
     const live = hub.sessions.get(id);
-    if (live) return Promise.resolve(live);
+    if (live) return live;
     let p = loading.get(id);
     if (!p) {
       p = (async () => {
         if (!(await hub.store.runs(id)).length) return null;
-        if (hub.sessions.size >= MAX_SESSIONS) evictOldest(hub, streams);
+        if (hub.sessions.size >= MAX_SESSIONS) evict();
         const s = await Session.resume(hub, id);
         if (!s.runIds.every((r) => s.settled(r))) s.play(TICK_MS);
         return s;
@@ -129,10 +137,16 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
     try { await getSession(id); } catch (e) { console.error(`resume ${id} failed:`, (e as Error).message); }
   }
 
+  // Frames are built strictly in commit order: a later frame never overtakes an earlier one (its cursor would skip rows).
+  let frames: Promise<void> = Promise.resolve();
   const broadcast = (sessionId: string, runId: string, rows: Row[]) => {
-    const subs = streams.get(sessionId);
-    if (!subs?.size) return;
-    void payload(hub, runId).then((data) => { for (const c of subs) send(c, runId, rows, data); }).catch((e) => console.error('frame failed:', e));
+    if (!streams.get(sessionId)?.size) return;
+    frames = frames.then(async () => {
+      const subs = streams.get(sessionId);
+      if (!subs?.size) return;
+      const data = await payload(hub, runId);
+      for (const c of subs) send(c, runId, rows, data);
+    }).catch((e) => console.error('frame failed:', e));
   };
   hub.listeners.add((rows: Row[]) => { if (rows[0]) broadcast(hub.sim.sessionFor(rows[0].runId), rows[0].runId, rows); });
   hub.tickListeners.add((s) => { for (const r of s.runIds) broadcast(s.id, r, []); });
@@ -141,7 +155,8 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
     try {
       const url = new URL(req.url ?? '/', 'http://x');
       const p = url.pathname;
-      if (p === '/api/health') return json(res, 200, { ok: true, store: hub.store.kind, sessions: hub.sessions.size });
+      if (p === '/api/health') return json(res, hub.fenced ? 503 : 200, { ok: !hub.fenced, store: hub.store.kind, sessions: hub.sessions.size, ...(hub.fenced ? { error: 'another KEEL process owns the database' } : {}) });
+      if (hub.fenced && p.startsWith('/api/')) return json(res, 503, { error: 'this instance has been replaced; reload the page' });
       if (p === '/api/scenarios' && req.method === 'GET') {
         return json(res, 200, Object.values(scenarios).filter((s) => injectable[s.id]).map((s) => ({
           id: s.id, title: s.title, blurb: s.blurb, goal: s.goal.statement, domain: s.domain.name,
@@ -160,9 +175,10 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
         while (created.length && t - created[0].at > 60_000) created.shift();
         if (created.filter((c) => c.ip === ip).length >= 12 || created.length >= 120) return json(res, 429, { error: 'too many new runs; wait a minute' });
         created.push({ at: t, ip });
-        if (hub.sessions.size >= MAX_SESSIONS) evictOldest(hub, streams);
+        if (hub.sessions.size >= MAX_SESSIONS) evict();
         void prune().catch((e) => console.error('prune failed:', e));
-        const s = await Session.create(hub, randomUUID().slice(0, 8), scenario, pols);
+        // 128 random bits: a session link is a capability (it can steer that demo run), so it must not be guessable.
+        const s = await Session.create(hub, randomUUID().replaceAll('-', ''), scenario, pols);
         s.play(TICK_MS);
         return json(res, 201, { sessionId: s.id, runIds: s.runIds, scenario, tickMs: TICK_MS });
       }
@@ -192,12 +208,15 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
           if (!allowed) return json(res, 400, { error: 'that observation is not injectable here' });
           injections.set(s.id, used + 1);
           const src = scenarios[s.scenario].sources[allowed.source];
-          const seqs = s.runIds.map((r) => hub.state(r)?.world.lastSeq[`${src.id}|${allowed.fact}`] ?? 0);
-          const o = { eventId: `inj-${randomUUID().slice(0, 8)}`, source: src.id, seq: Math.max(...seqs, 1000 + s.tick) + 1, fact: allowed.fact, value: body.value as Json, observedAt: s.tick };
-          const obs = { ...o, sig: body.forged ? sign(o, 'visitor-forgery') : sign(o, src.key) };
+          const forged = !!body.forged;
+          // Built inside the session's injection queue, so two concurrent requests never share a sequence number.
           // Persisted before delivery: a genuine injection changes SIMULATED reality for every lane; a forgery changes nothing real.
-          await s.injectShared({ tick: s.tick, fact: allowed.fact, value: body.value as Json, real: !body.forged, obs });
-          return json(res, 202, { eventId: obs.eventId, forged: !!body.forged });
+          const inj = await s.injectShared(() => {
+            const seqs = s.runIds.map((r) => hub.state(r)?.world.lastSeq[`${src.id}|${allowed.fact}`] ?? 0);
+            const o = { eventId: `inj-${randomUUID().slice(0, 12)}`, source: src.id, seq: Math.max(...seqs, 1000 + s.tick) + 1, fact: allowed.fact, value: body.value as Json, observedAt: s.tick };
+            return { tick: s.tick, fact: allowed.fact, value: body.value as Json, real: !forged, obs: { ...o, sig: forged ? sign(o, 'visitor-forgery') : sign(o, src.key) } };
+          });
+          return json(res, 202, { eventId: inj.obs.eventId, forged });
         }
         const runId = String(body.runId ?? '');
         if (!s.runIds.includes(runId)) return json(res, 400, { error: 'unknown run' });
@@ -207,10 +226,15 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
         if (action === 'operator') {
           const cmd = String(body.cmd);
           if (!['resume', 'abort', 'confirm'].includes(cmd)) return json(res, 400, { error: 'bad command' });
-          const st = hub.state(runId);
-          if (cmd === 'confirm' && !(st?.world.unstable.includes(String(body.fact)))) return json(res, 400, { error: 'only an unstable fact can be confirmed' });
-          // A confirmation adopts the latest reported value; the browser cannot choose an arbitrary one.
-          await hub.submit(runId, { t: 'operator', cmd: cmd as 'resume', fact: cmd === 'confirm' ? String(body.fact) : undefined, value: cmd === 'confirm' ? st!.world.facts[String(body.fact)] : undefined, at: s.tick }, s);
+          const fact = String(body.fact);
+          // Evaluated inside the run's mailbox, after every observation queued before it: a confirmation adopts the value
+          // that is current at that moment (the browser cannot choose one), and is refused if the fact is no longer unstable.
+          const ok = await hub.submitFrom(runId, (st) => {
+            if (cmd !== 'confirm') return { t: 'operator', cmd: cmd as 'resume', at: s.tick };
+            if (!st?.world.unstable.includes(fact)) return null;
+            return { t: 'operator', cmd: 'confirm', fact, value: st.world.facts[fact], at: s.tick };
+          }, s);
+          if (!ok) return json(res, 409, { error: 'only an unstable fact can be confirmed' });
           return json(res, 202, { ok: true });
         }
         if (action === 'crash') { await hub.crashAndRecover(runId, s); return json(res, 202, { ok: true }); }
@@ -261,20 +285,25 @@ async function stream(req: IncomingMessage, res: ServerResponse, hub: Hub, s: Se
   streams.set(s.id, set);
   req.on('close', () => { clearInterval(c.ping); set.delete(c); });
   try {
-    const catchup = await Promise.all(s.runIds.map(async (r) => ({ r, rows: await hub.store.rows(r, c.cursor.get(r) ?? 0) })));
+    // Read everything first (live frames keep buffering meanwhile), then write catch-up and backlog in one go, in order.
+    const catchup = await Promise.all(s.runIds.map(async (r) => ({ r, rows: await hub.store.rows(r, c.cursor.get(r) ?? 0), data: await payload(hub, r) })));
     c.ready = true;
-    for (const { r, rows } of catchup) send(c, r, rows, await payload(hub, r));
+    for (const { r, rows, data } of catchup) send(c, r, rows, data);
     for (const b of c.backlog.splice(0)) send(c, b.runId, b.rows, b.data);
   } catch (e) { console.error('stream failed:', e); res.destroy(); }
 }
 
-function evictOldest(hub: Hub, streams: Map<string, Set<Conn>>) {
-  const [id, s] = hub.sessions.entries().next().value!;
+/** Stop the oldest session, let its in-flight inputs finish (an effect mid-way needs its caches), then drop the caches. */
+function evictOldest(hub: Hub, streams: Map<string, Set<Conn>>): { id: string; done: Promise<void> } | null {
+  const first = hub.sessions.entries().next().value;
+  if (!first) return null;
+  const [id, s] = first;
   s.close();
   hub.sessions.delete(id);
-  for (const r of s.runIds) { hub.states.delete(r); hub.sim.forget(r); }
   for (const c of streams.get(id) ?? []) { clearInterval(c.ping); c.res.end(); }
   streams.delete(id); // the run stays in the store and can be reopened by id
+  const done = hub.drain(s.runIds).catch(() => {}).then(() => { for (const r of s.runIds) { hub.states.delete(r); hub.sim.forget(r); } });
+  return { id, done };
 }
 
 function json(res: ServerResponse, code: number, body: unknown) {

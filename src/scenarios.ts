@@ -99,7 +99,7 @@ const logistics: Domain = {
         { fact: `route:${p.route}.etaMin`, op: 'lte', ref: `order:${p.order}.coldHoldMin` },
       ],
       maintains: (p) => [{ fact: `route:${p.route}.status`, op: 'eq', value: 'open' }],
-      maintainsUntil: (p) => ({ fact: `order:${p.order}.delivery`, op: 'neq', value: 'pending' }),
+      maintainsUntil: (p) => ({ fact: `order:${p.order}.delivery`, op: 'eq', value: 'delivered' }), // a stuck truck keeps the obligation live
       produces: (p, f) => ({ [`order:${p.order}.dispatchedVia`]: p.route, [`order:${p.order}.etaMin`]: f[`route:${p.route}.etaMin`] ?? null, [`truck:${p.truck}.status`]: 'en-route' }),
       effectKey: (p) => `dispatch:${p.order}`,
     },
@@ -142,6 +142,7 @@ const logisticsGoal: Goal = {
     { fact: 'order:1042.etaMin', op: 'lte', ref: 'order:1042.slaMin' },
     { fact: 'order:1042.etaMin', op: 'lte', ref: 'order:1042.coldHoldMin' },
     { fact: 'order:1042.customerNotified', op: 'eq', value: true },
+    { fact: 'order:1042.delivery', op: 'in', value: ['pending', 'delivered'] }, // a reported stuck truck is never success
   ],
 };
 

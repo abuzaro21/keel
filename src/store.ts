@@ -28,8 +28,22 @@ export type Dump = {
   clocks: { session: string; tick: number }[];
 };
 
+/** Thrown by every write once another process has claimed the database (see `Store.claim`). */
+export class FencedError extends Error {
+  constructor(mine: number, current: number) { super(`fenced: this process holds owner epoch ${mine}, the database is now owned by epoch ${current}`); }
+}
+export const SCHEMA_VERSION = 1;
+
 export interface Store {
   readonly kind: 'sqlite' | 'postgres';
+  /**
+   * Become the single writer: bump the owner epoch and remember it. From then on every write transaction re-reads
+   * the epoch under a lock and fails with FencedError if a newer process has claimed the database since. This is a
+   * fencing token, so a stalled old process can never apply an effect after the new owner has reconciled it.
+   */
+  claim(holder: string): Promise<number>;
+  /** Called whenever a write is refused because another process owns the database. */
+  onFenced?: (e: FencedError) => void;
   createRun(r: Omit<RunInfo, 'created'>): Promise<void>;
   /** Append atomically iff the stream head is still `expected`; throws `stream conflict` otherwise. */
   append(runId: string, expected: number, evs: Ev[], tick: number): Promise<Row[]>;
@@ -74,7 +88,16 @@ const TABLES = (S: string, t: { real: string; serial: string; bool: string }) =>
   CREATE TABLE IF NOT EXISTS ${S}injections (session TEXT NOT NULL, seq ${t.serial}, tick INTEGER NOT NULL, fact TEXT NOT NULL, value TEXT NOT NULL, real ${t.bool} NOT NULL, obs TEXT NOT NULL);
   CREATE INDEX IF NOT EXISTS injections_session ON ${S}injections (session, seq);
   CREATE TABLE IF NOT EXISTS ${S}world_clock (session TEXT PRIMARY KEY, tick INTEGER NOT NULL, updated ${t.real} NOT NULL);
+  CREATE TABLE IF NOT EXISTS ${S}owner (id INTEGER PRIMARY KEY CHECK (id = 1), epoch BIGINT NOT NULL, holder TEXT NOT NULL, since ${t.real} NOT NULL);
+  CREATE TABLE IF NOT EXISTS ${S}schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL);
 `;
+const CLAIM = (S: string, p1: string, p2: string) => `INSERT INTO ${S}owner (id, epoch, holder, since) VALUES (1, 1, ${p1}, ${p2})
+  ON CONFLICT (id) DO UPDATE SET epoch = ${S}owner.epoch + 1, holder = EXCLUDED.holder, since = EXCLUDED.since RETURNING epoch`;
+/** Refuse to run on a database created by an older, unversioned KEEL (it would silently miss columns). */
+function checkVersion(hasRuns: boolean, version: number | undefined) {
+  if (version === undefined && hasRuns) throw new Error('legacy KEEL database without schema_meta (pre-async build): export it with that build or start from an empty database');
+  if (version !== undefined && version !== SCHEMA_VERSION) throw new Error(`database schema version ${version}, this build needs ${SCHEMA_VERSION}`);
+}
 
 // ---------------------------------------------------------------- SQLite
 export class SqliteStore implements Store {
@@ -83,15 +106,35 @@ export class SqliteStore implements Store {
   constructor(path = ':memory:') {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
-    this.db.exec(TABLES('', { real: 'REAL', serial: 'INTEGER NOT NULL', bool: 'INTEGER' }));
+    try { this.init(); } catch (e) { this.db.close(); throw e; } // never leak the file handle of a refused database
   }
-  private tx<T>(fn: () => T): T {
+  private init() {
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
+    this.tx(() => {
+      const has = (t: string) => !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(t);
+      checkVersion(has('runs'), has('schema_meta') ? (this.db.prepare('SELECT version FROM schema_meta').get() as { version: number } | undefined)?.version : undefined);
+      this.db.exec(TABLES('', { real: 'REAL', serial: 'INTEGER NOT NULL', bool: 'INTEGER' }));
+      this.db.prepare('INSERT INTO schema_meta (id, version) VALUES (1, ?) ON CONFLICT(id) DO NOTHING').run(SCHEMA_VERSION);
+    }, false);
+  }
+  private epoch: number | null = null;
+  onFenced?: (e: FencedError) => void;
+  private tx<T>(fn: () => T, fenced = true): T {
     this.db.exec('BEGIN IMMEDIATE'); // single writer for the whole database file
-    try { const r = fn(); this.db.exec('COMMIT'); return r; } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    try {
+      if (fenced && this.epoch !== null) {
+        const cur = Number((this.db.prepare('SELECT epoch FROM owner WHERE id = 1').get() as { epoch: number } | undefined)?.epoch ?? 0);
+        if (cur !== this.epoch) { const err = new FencedError(this.epoch, cur); this.onFenced?.(err); throw err; }
+      }
+      const r = fn(); this.db.exec('COMMIT'); return r;
+    } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  async claim(holder: string) {
+    this.epoch = this.tx(() => Number((this.db.prepare(CLAIM('', '?', '?')).get(holder, Date.now()) as { epoch: number }).epoch), false);
+    return this.epoch;
   }
   async createRun(r: Omit<RunInfo, 'created'>) {
-    this.db.prepare('INSERT INTO runs (run_id, session, scenario, policy, created) VALUES (?, ?, ?, ?, ?)').run(r.runId, r.session, r.scenario, r.policy, Date.now());
+    this.tx(() => this.db.prepare('INSERT INTO runs (run_id, session, scenario, policy, created) VALUES (?, ?, ?, ?, ?)').run(r.runId, r.session, r.scenario, r.policy, Date.now()));
   }
   async append(runId: string, expected: number, evs: Ev[], tick: number) {
     const wall = now();
@@ -135,7 +178,7 @@ export class SqliteStore implements Store {
     return (this.db.prepare('SELECT * FROM injections WHERE session = ? ORDER BY seq').all(session) as Record<string, unknown>[]).map(injectionRow);
   }
   async setClock(session: string, tick: number) {
-    this.db.prepare('INSERT INTO world_clock (session, tick, updated) VALUES (?, ?, ?) ON CONFLICT(session) DO UPDATE SET tick = MAX(world_clock.tick, excluded.tick), updated = excluded.updated').run(session, tick, Date.now());
+    this.tx(() => this.db.prepare('INSERT INTO world_clock (session, tick, updated) VALUES (?, ?, ?) ON CONFLICT(session) DO UPDATE SET tick = MAX(world_clock.tick, excluded.tick), updated = excluded.updated').run(session, tick, Date.now()));
   }
   async clock(session: string) {
     return Number((this.db.prepare('SELECT tick FROM world_clock WHERE session = ?').get(session) as { tick: number } | undefined)?.tick ?? 0);
@@ -145,11 +188,15 @@ export class SqliteStore implements Store {
   }
   async prune(before: number) {
     const old = (this.db.prepare('SELECT session FROM runs GROUP BY session HAVING MAX(created) < ?').all(before) as { session: string }[]).map((r) => r.session);
-    this.tx(() => { for (const s of old) for (const t of ['runs', 'injections', 'world_clock']) this.db.prepare(`DELETE FROM ${t} WHERE session = ?`).run(s); });
+    this.tx(() => { for (const s of old) for (const t of ['runs', 'injections', 'world_clock']) this.db.prepare(`DELETE FROM ${t} WHERE session = ?`).run(s); }, false);
     return old.length;
   }
   async dump(): Promise<Dump> {
     const all = (sql: string) => this.db.prepare(sql).all() as Record<string, unknown>[];
+    this.db.exec('BEGIN'); // one read snapshot for the whole dump
+    try { return this.dumpIn(all); } finally { this.db.exec('COMMIT'); }
+  }
+  private dumpIn(all: (sql: string) => Record<string, unknown>[]): Dump {
     return {
       format: 'keel-dump/1',
       runs: all('SELECT * FROM runs ORDER BY created').map((r) => ({ runId: r.run_id as string, session: r.session as string, scenario: r.scenario as string, policy: r.policy as string, created: Number(r.created), head: Number(r.head) })),
@@ -167,7 +214,7 @@ export class SqliteStore implements Store {
       for (const e of d.effects) this.db.prepare('INSERT INTO sim_effects (op_id, run_id, action, params, request_hash, tick, harm, applied, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(e.opId, e.runId, e.action, JSON.stringify(e.params), e.requestHash, e.tick, e.harm, JSON.stringify(e.applied), e.seq);
       for (const i of d.injections) this.db.prepare('INSERT INTO injections (session, seq, tick, fact, value, real, obs) VALUES (?, ?, ?, ?, ?, ?, ?)').run(i.session, i.seq, i.tick, i.fact, JSON.stringify(i.value), i.real ? 1 : 0, JSON.stringify(i.obs));
       for (const c of d.clocks) this.db.prepare('INSERT INTO world_clock (session, tick, updated) VALUES (?, ?, ?)').run(c.session, c.tick, Date.now());
-    });
+    }, false);
   }
   async close() { this.db.close(); }
 }
@@ -188,15 +235,35 @@ export class PgStore implements Store {
   static async open(url: string, schema = 'keel'): Promise<PgStore> {
     if (!/^[a-z_][a-z0-9_]{0,40}$/.test(schema)) throw new Error('bad schema name');
     const pool = new pg.Pool({ connectionString: url, max: 5, allowExitOnIdle: true, ssl: /sslmode=require/.test(url) ? { rejectUnauthorized: false } : undefined });
-    await pool.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
-    await pool.query(TABLES(`${schema}.`, { real: 'DOUBLE PRECISION', serial: 'BIGSERIAL', bool: 'BOOLEAN' }));
-    return new PgStore(pool, schema);
+    // An idle client losing its connection (DB restart, network blip) must not crash the process; the pool replaces it.
+    pool.on('error', (e) => console.error('postgres idle client error:', e.message));
+    const store = new PgStore(pool, schema);
+    await store.tx(async (c) => {
+      await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`keel-migrate:${schema}`]); // one migrator at a time
+      await c.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+      const has = async (t: string) => (await c.query('SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2', [schema, t])).rowCount === 1;
+      checkVersion(await has('runs'), await has('schema_meta') ? (await c.query(`SELECT version FROM ${schema}.schema_meta`)).rows[0]?.version : undefined);
+      await c.query(TABLES(`${schema}.`, { real: 'DOUBLE PRECISION', serial: 'BIGSERIAL', bool: 'BOOLEAN' }));
+      await c.query(`INSERT INTO ${schema}.schema_meta (id, version) VALUES (1, $1) ON CONFLICT (id) DO NOTHING`, [SCHEMA_VERSION]);
+    }, false);
+    return store;
+  }
+  private epoch: number | null = null;
+  onFenced?: (e: FencedError) => void;
+  async claim(holder: string) {
+    this.epoch = Number((await this.pool.query(CLAIM(`${this.schema}.`, '$1', '$2'), [holder, Date.now()])).rows[0].epoch);
+    return this.epoch;
   }
   private q(text: string, values?: unknown[]) { return this.pool.query(text.replaceAll('$S.', `${this.schema}.`), values); }
-  private async tx<T>(fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
+  private async tx<T>(fn: (c: pg.PoolClient) => Promise<T>, fenced = true, begin = 'BEGIN'): Promise<T> {
     const c = await this.pool.connect();
     try {
-      await c.query('BEGIN');
+      await c.query(begin);
+      if (fenced && this.epoch !== null) {
+        // FOR SHARE: this owner's writers run concurrently; a claim (UPDATE) waits for them, and every later one sees it.
+        const cur = Number((await c.query(`SELECT epoch FROM ${this.schema}.owner WHERE id = 1 FOR SHARE`)).rows[0]?.epoch ?? 0);
+        if (cur !== this.epoch) { const err = new FencedError(this.epoch, cur); this.onFenced?.(err); throw err; }
+      }
       const r = await fn(c);
       await c.query('COMMIT');
       return r;
@@ -207,7 +274,7 @@ export class PgStore implements Store {
   }
 
   async createRun(r: Omit<RunInfo, 'created'>) {
-    await this.q('INSERT INTO $S.runs (run_id, session, scenario, policy, created) VALUES ($1, $2, $3, $4, $5)', [r.runId, r.session, r.scenario, r.policy, Date.now()]);
+    await this.tx((c) => c.query(`INSERT INTO ${this.schema}.runs (run_id, session, scenario, policy, created) VALUES ($1, $2, $3, $4, $5)`, [r.runId, r.session, r.scenario, r.policy, Date.now()]));
   }
   async append(runId: string, expected: number, evs: Ev[], tick: number) {
     const wall = now();
@@ -232,22 +299,26 @@ export class PgStore implements Store {
     return r.rows.map((x) => ({ runId: x.run_id, session: x.session, scenario: x.scenario, policy: x.policy, created: Number(x.created) }));
   }
   async insertEffect(e: EffectRow) {
-    const r = await this.q('INSERT INTO $S.sim_effects (op_id, run_id, action, params, request_hash, tick, harm, applied) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (op_id) DO NOTHING RETURNING op_id',
-      [e.opId, e.runId, e.action, JSON.stringify(e.params), e.requestHash, e.tick, e.harm, JSON.stringify(e.applied)]);
-    if (r.rowCount === 1) return { inserted: true, row: e };
-    return { inserted: false, row: effectRow((await this.q('SELECT * FROM $S.sim_effects WHERE op_id = $1', [e.opId])).rows[0]) };
+    const S = this.schema;
+    return this.tx(async (c) => {
+      const r = await c.query(`INSERT INTO ${S}.sim_effects (op_id, run_id, action, params, request_hash, tick, harm, applied) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (op_id) DO NOTHING RETURNING op_id`,
+        [e.opId, e.runId, e.action, JSON.stringify(e.params), e.requestHash, e.tick, e.harm, JSON.stringify(e.applied)]);
+      if (r.rowCount === 1) return { inserted: true, row: e };
+      return { inserted: false, row: effectRow((await c.query(`SELECT * FROM ${S}.sim_effects WHERE op_id = $1`, [e.opId])).rows[0]) };
+    });
   }
   async effects(runId: string) {
     return (await this.q('SELECT * FROM $S.sim_effects WHERE run_id = $1 ORDER BY seq', [runId])).rows.map(effectRow);
   }
   async addInjection(session: string, i: Injection) {
-    await this.q('INSERT INTO $S.injections (session, tick, fact, value, real, obs) VALUES ($1, $2, $3, $4, $5, $6)', [session, i.tick, i.fact, JSON.stringify(i.value), i.real, JSON.stringify(i.obs)]);
+    await this.tx((c) => c.query(`INSERT INTO ${this.schema}.injections (session, tick, fact, value, real, obs) VALUES ($1, $2, $3, $4, $5, $6)`, [session, i.tick, i.fact, JSON.stringify(i.value), i.real, JSON.stringify(i.obs)]));
   }
   async injections(session: string) {
     return (await this.q('SELECT * FROM $S.injections WHERE session = $1 ORDER BY seq', [session])).rows.map(injectionRow);
   }
   async setClock(session: string, tick: number) {
-    await this.q('INSERT INTO $S.world_clock (session, tick, updated) VALUES ($1, $2, $3) ON CONFLICT (session) DO UPDATE SET tick = GREATEST($S.world_clock.tick, EXCLUDED.tick), updated = EXCLUDED.updated', [session, tick, Date.now()]);
+    const S = this.schema;
+    await this.tx((c) => c.query(`INSERT INTO ${S}.world_clock (session, tick, updated) VALUES ($1, $2, $3) ON CONFLICT (session) DO UPDATE SET tick = GREATEST(${S}.world_clock.tick, EXCLUDED.tick), updated = EXCLUDED.updated`, [session, tick, Date.now()]));
   }
   async clock(session: string) {
     return Number((await this.q('SELECT tick FROM $S.world_clock WHERE session = $1', [session])).rows[0]?.tick ?? 0);
@@ -261,10 +332,13 @@ export class PgStore implements Store {
       const old = (await c.query(`SELECT session FROM ${S}.runs GROUP BY session HAVING MAX(created) < $1`, [before])).rows.map((x) => x.session);
       if (old.length) for (const t of ['runs', 'injections', 'world_clock']) await c.query(`DELETE FROM ${S}.${t} WHERE session = ANY($1)`, [old]);
       return old.length;
-    });
+    }, false);
   }
   async dump(): Promise<Dump> {
-    const all = async (sql: string) => (await this.q(sql)).rows as Record<string, unknown>[];
+    // One REPEATABLE READ snapshot: every table is read as of the same instant, so run heads match their events.
+    return this.tx((c) => this.dumpIn(async (sql: string) => (await c.query(sql.replaceAll('$S.', `${this.schema}.`))).rows as Record<string, unknown>[]), false, 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  }
+  private async dumpIn(all: (sql: string) => Promise<Record<string, unknown>[]>): Promise<Dump> {
     return {
       format: 'keel-dump/1',
       runs: (await all('SELECT * FROM $S.runs ORDER BY created')).map((r) => ({ runId: r.run_id as string, session: r.session as string, scenario: r.scenario as string, policy: r.policy as string, created: Number(r.created), head: Number(r.head) })),
@@ -286,7 +360,7 @@ export class PgStore implements Store {
       // keep BIGSERIAL sequences ahead of restored values
       await c.query(`SELECT setval(pg_get_serial_sequence('${S}.sim_effects', 'seq'), GREATEST((SELECT COALESCE(MAX(seq), 0) FROM ${S}.sim_effects), 1))`);
       await c.query(`SELECT setval(pg_get_serial_sequence('${S}.injections', 'seq'), GREATEST((SELECT COALESCE(MAX(seq), 0) FROM ${S}.injections), 1))`);
-    });
+    }, false);
   }
   async close() { await this.pool.end(); }
 }

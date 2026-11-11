@@ -11,7 +11,9 @@ import { scenarios } from './scenarios.ts';
 import type { FeedItem, Scenario } from './scenarios.ts';
 import { sign } from './world.ts';
 import type { Observation } from './world.ts';
-import { openStore } from './store.ts';
+import { hostname } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { openStore, FencedError } from './store.ts';
 import type { EffectRow, Injection, Row, Store } from './store.ts';
 import { Sim } from './sim.ts';
 import type { Faults } from './sim.ts';
@@ -41,7 +43,9 @@ export class Hub {
   listeners = new Set<Listener>();
   /** Presentation only: told when a session's world clock advances (the agent is never told). */
   tickListeners = new Set<(session: Session) => void>();
-  private chains = new Map<string, Promise<void>>();
+  private chains = new Map<string, Promise<unknown>>();
+  /** Set once another process claimed the database: this process must stop writing (and stops its sessions). */
+  fenced: FencedError | null = null;
   /** Test-only crash injection: SIGKILL this process around the effect boundary of one effect key. */
   failpoint: string | null = process.env.KEEL_FAILPOINT ?? null;
   failEffect: string | null = process.env.KEEL_FAILPOINT_EFFECT ?? null;
@@ -50,9 +54,13 @@ export class Hub {
     this.store = store;
     this.sim = new Sim(store, faults);
     this.planner = new Planner();
+    store.onFenced = (e) => this.fence(e); // any refused write, from any path, stops this process's sessions
   }
+  /** Open the store and claim it: this process becomes the only writer; any older process is fenced off. */
   static async open(target?: string, faults: Faults = {}, schema?: string): Promise<Hub> {
-    return new Hub(await openStore(target, schema), faults);
+    const store = await openStore(target, schema);
+    await store.claim(`${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`);
+    return new Hub(store, faults);
   }
   async close() { for (const s of this.sessions.values()) s.close(); await this.store.close(); }
 
@@ -67,14 +75,37 @@ export class Hub {
   }
 
   /** Enqueue work on a run's mailbox; resolves when it (and everything it synchronously caused) is persisted and performed. */
-  private enqueue(runId: string, job: () => Promise<void>): Promise<void> {
+  private enqueue<T>(runId: string, job: () => Promise<T>): Promise<T> {
     const next = (this.chains.get(runId) ?? Promise.resolve()).then(job);
     this.chains.set(runId, next.catch(() => {}));
     return next;
   }
+  /** Resolves when everything already queued for these runs has finished (used before evicting their caches). */
+  async drain(runIds: string[]) { await Promise.all(runIds.map((r) => this.chains.get(r))); }
 
   submit(runId: string, input: Ev, session: Session): Promise<void> {
     return this.enqueue(runId, () => this.process(runId, input, session));
+  }
+
+  /**
+   * Build the input from the run's state at the moment it is processed (inside the mailbox), not when the request
+   * arrived: e.g. an operator confirmation adopts the value that is current after every earlier observation.
+   * Returns false (and records nothing) if `make` declines.
+   */
+  submitFrom(runId: string, make: (s: RunState | null) => Ev | null, session: Session): Promise<boolean> {
+    return this.enqueue(runId, async () => {
+      const input = make(this.state(runId));
+      if (!input) return false;
+      await this.process(runId, input, session);
+      return true;
+    });
+  }
+
+  private fence(e: FencedError) {
+    if (this.fenced) return;
+    this.fenced = e;
+    console.error(`${e.message}; stopping every session in this process`);
+    for (const s of this.sessions.values()) s.close();
   }
 
   private async process(runId: string, input: Ev, session: Session) {
@@ -88,7 +119,7 @@ export class Hub {
         rows = await this.store.append(runId, st?.seq ?? 0, [inp, ...decisions], session.tick);
       } catch (e) {
         this.states.delete(runId); // never act on a state the store rejected; the next input reloads from the log
-        await this.load(runId, session.id);
+        if (!this.fenced) await this.load(runId, session.id);
         throw e;
       }
       let s = st;
@@ -155,13 +186,15 @@ export class Session {
     for (const p of policyNames) if (!Object.hasOwn(policies, p)) throw new Error(`unknown policy ${p}`);
     if (new Set(policyNames).size !== policyNames.length) throw new Error('duplicate policy');
     this.runIds = policyNames.map((p) => `${id}-${p}`);
-    hub.sessions.set(id, this);
+    // Not published in hub.sessions here: only `create`/`resume` publish a session, once it is fully loaded.
   }
 
   /** Create and start a session: one run per policy, sharing one world feed. */
   static async create(hub: Hub, id: string, scenario: string, policyNames: PolicyName[]): Promise<Session> {
+    if (hub.fenced) throw hub.fenced;
     const s = new Session(hub, id, scenario, policyNames);
-    await s.start();
+    hub.sessions.set(id, s); // its own start-up inputs need it reachable (presentation looks up the clock)
+    try { await s.start(); } catch (e) { hub.sessions.delete(id); throw e; }
     return s;
   }
 
@@ -209,6 +242,7 @@ export class Session {
       const st = hub.state(r.runId);
       if (st && st.status !== 'completed' && st.status !== 'stopped') await hub.submit(r.runId, { t: 'recover', at: s.tick }, s);
     }
+    hub.sessions.set(id, s); // published only now: a concurrent request never sees a half-loaded session
     return s;
   }
 
@@ -229,10 +263,21 @@ export class Session {
     });
   }
 
-  /** A visitor injection: persisted first (with its signed envelope), then delivered to every lane. Recovery re-delivers missing copies. */
-  async injectShared(i: Injection) {
-    await this.hub.sim.addInjection(this.id, i);
-    await this.injectAll(i.obs);
+  /**
+   * A visitor injection: persisted first (with its signed envelope), then delivered to every lane. Recovery re-delivers
+   * missing copies. Injections of one session are strictly serialised, so persisted order == simulated-truth order ==
+   * delivery order, and a builder sees the sequence numbers every earlier injection already consumed.
+   */
+  private injecting: Promise<unknown> = Promise.resolve();
+  injectShared(i: Injection | (() => Injection)): Promise<Injection> {
+    const job = this.injecting.then(async () => {
+      const inj = typeof i === 'function' ? i() : i;
+      await this.hub.sim.addInjection(this.id, inj);
+      await this.injectAll(inj.obs);
+      return inj;
+    });
+    this.injecting = job.catch(() => {});
+    return job;
   }
 
   inject(runId: string, obs: Observation) { return this.hub.submit(runId, { t: 'observation', obs, at: this.tick }, this); }

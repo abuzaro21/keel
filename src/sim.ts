@@ -83,6 +83,8 @@ export class Sim {
   /** Authoritative lookup by operation id, straight from the store (never the cache): did it happen? */
   async lookup(runId: string, opId: string): Promise<{ found: 'yes' | 'no'; applied: Facts | null }> {
     const r = (await this.store.effects(runId)).find((e) => e.opId === opId);
+    const cache = this.fx.get(runId);
+    if (r && cache && !cache.some((e) => e.opId === opId)) cache.push(r); // adopt it: truth, reports and outcome must see it
     return r ? { found: 'yes', applied: r.applied } : { found: 'no', applied: null };
   }
 

@@ -30,8 +30,11 @@ const session = async (scenario: string, policies: ('keel' | 'static' | 'naive' 
 
 test('Scenario A: static fails silently; KEEL preserves completed work and repairs only route-bound steps', async () => {
   const { m, ev } = await session('delivery', ['static', 'keel']);
-  assert.equal(m.static.beliefGoalMet, true, 'static believes it succeeded');
-  assert.equal(m.static.goalMet, false, 'but the simulated world says it failed');
+  // Open loop: it dispatched onto the closed road and notified the customer "on time"; it only learns the truth from
+  // the carrier's report after both irreversible steps already happened.
+  assert.equal(m.static.beliefGoalMet, false, 'static finds out only after the fact');
+  assert.equal(m.static.goalMet, false, 'and the simulated world says it failed');
+  assert.ok(ev('static').some((e) => e.t === 'commit_effect') && ev('static').findIndex((e) => e.t === 'observation' && e.obs.value === 'stuck') < ev('static').findLastIndex((e) => e.t === 'receipt'), 'notify ran after the stuck report');
   assert.equal(m.static.invalidActions, 1);
   assert.equal(m.keel.goalMet, true);
   assert.equal(m.keel.revisions, 1);

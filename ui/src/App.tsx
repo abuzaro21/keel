@@ -210,8 +210,8 @@ function Lane({ run, tickMs, tick, onOperator, onCrash, busy }: { run: Run; tick
       {last && adaptive && <ReasonCard rev={last} count={revs.length} />}
 
       {finished && (
-        <div className={`outcome ${m.outcomePending ? 'wait' : m.goalMet ? 'ok' : 'bad'}`} aria-live="polite">
-          <div><span className="eyebrow">Agent believes</span><strong>{m.beliefGoalMet === null ? (v.status === 'paused' ? 'stopped — goal not reached' : '—') : m.beliefGoalMet ? '✓ goal met' : '✗ goal not met'}</strong></div>
+        <div className={`outcome ${m.outcomePending || (v.status === 'paused' && !m.invalidActions) ? 'wait' : m.goalMet ? 'ok' : 'bad'}`} aria-live="polite">
+          <div><span className="eyebrow">Agent believes</span><strong>{m.beliefGoalMet === null ? (v.status === 'paused' ? 'paused — goal not reached yet; waiting for an operator' : v.status === 'stopped' ? 'stopped — goal not reached' : '—') : m.beliefGoalMet ? '✓ goal met' : '✗ goal not met'}</strong></div>
           <div><span className="eyebrow">Simulated world</span><strong>{m.outcomePending ? '… ' : m.goalMet ? '✓ ' : '✗ '}{m.truth}</strong></div>
           {m.violations.length > 0 && <div><span className="eyebrow">Known violation</span><span>{m.violations.join('; ')}</span></div>}
           {completed && m.beliefGoalMet && !m.goalMet && !m.outcomePending && <p className="silent">Silent failure: every step has a receipt, the agent reports success, and the world disagrees.</p>}
@@ -219,7 +219,7 @@ function Lane({ run, tickMs, tick, onOperator, onCrash, busy }: { run: Run; tick
       )}
 
       {adaptive && v.policy === 'keel' && (
-        <button className="crash" disabled={busy || v.status === 'completed'} onClick={onCrash} title="Drops every piece of in-memory agent state and agent timers for this run, then rebuilds the agent from the SQLite event log.">
+        <button className="crash" disabled={busy || v.status === 'completed'} onClick={onCrash} title="Drops every piece of in-memory agent state and agent timers for this run, then rebuilds the agent from the persisted event log.">
           Crash the agent <small>rebuild from the log</small>
         </button>
       )}
