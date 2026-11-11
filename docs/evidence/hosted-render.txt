@@ -1,0 +1,32 @@
+# Hosted demo on Render, 2026-11-11 (UTC). Service srv-dbpuqijrjlhs73b67h60 (free, frankfurt, Docker), Postgres keel-db (free, PG 16, frankfurt).
+# Blueprint exs-dbpuomu7bikc73bg4ugg (autoSync off). Deploys of main 9cd55c5 (= v1.0.0 7541de0 + render.yaml region):
+#   dep-dbpuqirrjlhs73b67ig0 blueprint_sync live 04:22:22; dep-dbpurmrl550s73917hhg api live 04:24:30; dep-dbputgh5efls7394vk30 api live 04:28:12
+
+## GET https://keel-1myw.onrender.com/api/health
+{"ok":true,"store":"postgres","sessions":4}
+
+## Smoke test (delivery: SSE, genuine/forged/invalid injection, crash of the KEEL lane, export, security headers)
+04:23:19 scenarios: 200 delivery,recovery,flapping tickMs 900
+04:23:19 create: 201 b3774033f0e540feaa054b5b50d98cba b3774033f0e540feaa054b5b50d98cba-static,b3774033f0e540feaa054b5b50d98cba-keel
+04:23:19 sse: 200 text/event-stream
+04:23:22 inject genuine: 202
+04:23:22 inject forged: {"eventId":"inj-cf6b0d00-998","forged":true}
+04:23:22 bad inject: 400
+04:23:22 crash keel lane: 202
+04:23:28 sse result: {"frames":46,"rows":65}
+04:23:37 static: completed goalMet=false dup=0 recovered=0 stale=0 rejected=1 | truck T1 dispatched onto closed route R1: stuck at the closure; the customer was told it was on time
+04:23:37 keel: completed goalMet=true dup=0 recovered=2 stale=0 rejected=1 | order #1042 delivered via R2 in 55 min (SLA 70, cold-hold 90)
+04:23:37 store postgres
+04:23:37 export: 200 application/json 40001 bytes
+04:23:37 headers: {"content-security-policy":"default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'","referrer-policy":"no-referrer","x-content-type-options":"nosniff"}
+SESSION b3774033f0e540feaa054b5b50d98cba
+
+## After two redeploys: sessions created on earlier instances, reloaded from Postgres on the current instance
+04:30:05 reload after restart: 200 keel:completed goalMet=true dup=0 | static:completed goalMet=false dup=0 store postgres
+04:30:05 reload after restart: 200 keel:completed goalMet=true dup=0 | static:completed goalMet=false dup=0 store postgres
+04:30:06 reload after restart: 200 keel:completed goalMet=true dup=0 | static:completed goalMet=false dup=0 store postgres
+
+## App logs checked: startup lines and one expected SSE backfill notice; no connection string, password or token logged.
+## Not shown on Render: a takeover in the middle of a run (each redeploy finished before or after the observed runs). The
+## local hosted check covers it with the same image on Postgres 16 (docs/evidence/hosted-check.txt).
+## Client identity: KEEL_TRUSTED_PROXY_HOPS=0 and no KEEL_CLIENT_IP_HEADER (cf-connecting-ip not enabled; Render's proxy not validated for it).

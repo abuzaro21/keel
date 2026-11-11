@@ -8,6 +8,8 @@ Built for the DOO Builders League challenge **The Adaptive Agent** — *"Can an 
 
 > Everything outside the agent is **simulated**: roads, trucks, regions, sensors and customers. No real system is touched.
 
+**Live demo:** https://keel-1myw.onrender.com (free Render instance: the first visit after 15 idle minutes takes about a minute to wake up).
+
 ## Run it
 
 ```bash
