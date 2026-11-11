@@ -326,8 +326,15 @@ function evictOldest(hub: Hub, streams: Map<string, Set<Conn>>): { id: string; d
   return { id, done };
 }
 
+/** The UI loads only its own bundle plus the Google Fonts stylesheet; nothing may frame it. */
+const SECURITY_HEADERS = {
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+};
+
 function json(res: ServerResponse, code: number, body: unknown) {
-  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end(JSON.stringify(body));
 }
 
@@ -346,6 +353,6 @@ function serveStatic(res: ServerResponse, p: string) {
   let file = join(PUBLIC, rel);
   if (!existsSync(file) || statSync(file).isDirectory()) file = join(PUBLIC, 'index.html'); // SPA fallback
   if (!existsSync(file)) return json(res, 404, { error: 'UI not built: run npm run build' });
-  res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream', 'cache-control': file.endsWith('index.html') ? 'no-store' : 'public, max-age=3600' });
+  res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': MIME[extname(file)] ?? 'application/octet-stream', 'cache-control': file.endsWith('index.html') ? 'no-store' : 'public, max-age=3600' });
   res.end(readFileSync(file));
 }

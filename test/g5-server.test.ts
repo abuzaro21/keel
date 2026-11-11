@@ -62,6 +62,11 @@ test('API: only allow-listed observations are injectable; bad bodies are 400; st
       const text = await r.text();
       assert.ok(!text.includes('"name": "keel"') && !text.includes('startServer'), `${p} leaked a file`);
     }
+    const page = await fetch(`${base}/`);
+    await page.arrayBuffer();
+    assert.match(page.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
+    assert.equal(page.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal((await fetch(`${base}/api/scenarios`)).headers.get('x-content-type-options'), 'nosniff');
   } finally { server.close(); await hub.close(); }
 });
 

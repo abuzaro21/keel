@@ -19,30 +19,31 @@ Update this file at every milestone. Another agent must be able to resume from i
 - The 2 failures are the recorded-model tests: the fingerprint now covers the action contracts, which changed,
   so the October recordings no longer match (correct behaviour — they must be re-captured, not edited).
 
-## Gates
+## Gates (2026-11-11, branch `wip/async-persistence`, local only)
 | Gate | State | Evidence |
 |---|---|---|
-| A source integrity | PASS (local) | checkpoint `c731622`; nothing outside `E:\doo\keel` touched |
-| B engine invariants | PASS except recordings | `npm test` (replay, crash-at-every-point, ack loss) |
-| C database | in progress | `test/g7-store.test.ts` 5/5 on SQLite + Postgres; SIGKILL tests pass on both |
-| D scenarios | PASS | g3g4 + e2e |
-| E browser | PASS | `npm run test:e2e` 10/10 desktop + Pixel 7 |
-| F security | in progress | Codex review #1 running; `npm audit --omit=dev` 0 vulns |
-| G deployment | NOT STARTED — needs owner approval | Docker image builds and is healthy locally |
-| H release | NOT STARTED | |
+| A source integrity | PASS | checkpoint `c731622`; only `E:\doo\keel` touched; no force push, no history rewrite |
+| B engine invariants | PASS | `npm test` (replay, crash-at-every-point, ack loss, SIGKILL) |
+| C database | PASS | 63/63 on SQLite and on Postgres 16; store contract (g7), fencing (g8/g9), export/import SQLite→PG verified |
+| D scenarios | PASS | g3g4, R1-6 regression (a "stuck" report never counts as success) |
+| E browser | PASS | `docs/evidence/test-e2e.txt` 10/10 desktop + phone |
+| F security | PASS (local) | Codex reviews #1 (14 findings) and #2 (3 open items) all fixed with regressions; CSP/nosniff; XFF policy tested; audit 0 vulns; `docs/SECURITY.md` |
+| G deployment | READY, NOT DONE: owner approval | Docker image healthy; `scripts/hosted-check.sh` on Postgres (`docs/evidence/hosted-check.txt`); `render.yaml` + `docs/DEPLOY.md` |
+| H release | local tag only | film built; docs complete; push/visibility/upload/submission need the owner |
 
-## Done this session
-- Recorder script ported to the async API (`scripts/record-planner.ts`).
-- Dockerfile installs the runtime `pg` dependency (previous image would have crashed with DATABASE_URL set).
-- UI: a paused KEEL lane no longer says "stopped"; neutral styling when paused without harm.
-- New Store contract tests (`test/g7-store.test.ts`); CI workflow `.github/workflows/ci.yml`.
+## Done
+- Codex review #1 and #2 findings fixed (`aabcfcd`): owner-epoch fencing incl. prune/restore, eviction quiesce, SSE gap close.
+- Recorded model proposals re-captured 2026-11-11 (`claude -p`, served claude-sonnet-5-5).
+- Film: `film/capture.mjs` (real captures), `film/tts.py` (Kokoro-82M), `film/build.mjs` (ffmpeg), `film/storyboard.md`,
+  `film/keel-film.srt`. Output `film/out/keel-film.mp4` (git-ignored; rebuild with the commands in the storyboard).
+- Docs: README, ARCHITECTURE (persistence section), FAILURE-TEST (process-level table), SECURITY, DEPLOY, SUBMISSION.
+- Security headers on static responses (tested in g5).
 
-## Next
-1. Triage and fix Codex review #1 findings (with regression tests).
-2. Re-capture recorded model proposals AFTER engine changes settle (`node scripts/record-planner.ts`, uses `claude -p`).
-3. UI first-15-seconds explainer; README/docs/AI disclosure/submission sheet.
-4. Film: Playwright capture + FFmpeg composition, captions, narration.
-5. Owner approvals: push branch, Render deploy (web + Postgres free), public visibility, video upload, submission.
+## Next (owner decisions; nothing below has been done)
+1. Push `wip/async-persistence` to the private repo and merge to `main` (CI then runs on GitHub).
+2. Create the Render free web service + free Postgres from `render.yaml` in the "keel" workspace.
+3. Make the repository public; upload the film; submit on build.doo.ooo (confirm deadline time zone and deliverables there).
+4. Listen to the film once: the narration is synthetic and was checked by duration and captions, not by ear.
 
 ## Resume commands
 ```
