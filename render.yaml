@@ -17,3 +17,4 @@ services:
 databases:
   - name: keel-db
     plan: free
+    postgresMajorVersion: "16"   # the version the suite is qualified on (CI service postgres:16)

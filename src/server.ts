@@ -17,6 +17,8 @@ import { sign } from './world.ts';
 import type { Json } from './model.ts';
 
 export const TICK_MS = Number(process.env.KEEL_TICK_MS ?? 900);
+/** Every resident slot is starting or loading; the request may retry shortly. */
+export class BusyError extends Error { constructor() { super('at capacity'); } }
 const MAX_SESSIONS = 40;            // sessions kept in memory (all of them stay in the store)
 const MAX_STREAMS_PER_SESSION = 8;
 const MAX_STREAMS = 200;
@@ -120,6 +122,14 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
   /** A session from memory, or reloaded from the store (e.g. after a restart) and resumed if still in progress. */
   const loading = new Map<string, Promise<Session | null>>();
   const evicting = new Map<string, Promise<void>>();
+  // Creations and reloads admitted but not yet resident. Counted before any await, so a burst cannot overshoot MAX_SESSIONS.
+  let reserved = 0;
+  const admit = () => {
+    if (hub.sessions.size + reserved >= MAX_SESSIONS) evict();
+    if (hub.sessions.size + reserved >= MAX_SESSIONS) return false; // every slot is starting or loading
+    reserved++;
+    return true;
+  };
   const evict = () => {
     const p = evictOldest(hub, streams);
     if (!p) return;
@@ -134,8 +144,9 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
     if (!p) {
       p = (async () => {
         if (!(await hub.store.runs(id)).length) return null;
-        if (hub.sessions.size >= MAX_SESSIONS) evict();
-        const s = await Session.resume(hub, id);
+        if (!admit()) throw new BusyError();
+        let s: Session;
+        try { s = await Session.resume(hub, id); } finally { reserved--; }
         if (!s.runIds.every((r) => s.settled(r))) s.play(TICK_MS);
         return s;
       })().finally(() => loading.delete(id));
@@ -196,10 +207,12 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
         while (created.length && t - created[0].at > 60_000) created.shift();
         if (created.filter((c) => c.ip === ip).length >= 12 || created.length >= 120) return json(res, 429, { error: 'too many new runs; wait a minute' });
         created.push({ at: t, ip });
-        if (hub.sessions.size >= MAX_SESSIONS) evict();
+        if (!admit()) return json(res, 503, { error: 'the demo is at capacity; try again in a minute' });
         void prune().catch((e) => console.error('prune failed:', e));
         // 128 random bits: a session link is a capability (it can steer that demo run), so it must not be guessable.
-        const s = await Session.create(hub, randomUUID().replaceAll('-', ''), scenario, pols);
+        const creating = Session.create(hub, randomUUID().replaceAll('-', ''), scenario, pols);
+        reserved--; // create() publishes the session before its first await; from here it counts itself
+        const s = await creating;
         s.play(TICK_MS);
         return json(res, 201, { sessionId: s.id, runIds: s.runIds, scenario, tickMs: TICK_MS });
       }
@@ -267,6 +280,7 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
       if ((e as Error).message === 'body too large') return json(res, 413, { error: 'request body too large' });
       if (e instanceof SyntaxError) return json(res, 400, { error: 'malformed JSON' });
       if (e instanceof FencedError) return json(res, 503, { error: 'this instance has been replaced; reload the page' });
+      if (e instanceof BusyError) return json(res, 503, { error: 'the demo is at capacity; try again in a minute' });
       if (e instanceof SessionClosedError) return json(res, 409, { error: 'this run was unloaded meanwhile; reload the page' });
       console.error(e);
       json(res, 500, { error: 'internal error' });
@@ -325,7 +339,7 @@ export function evictOldest(hub: Hub, streams: Map<string, Set<Conn>>): { id: st
   hub.sessions.delete(id);
   for (const c of streams.get(id) ?? []) { clearInterval(c.ping); c.res.end(); }
   streams.delete(id); // the run stays in the store and can be reopened by id
-  const done = s.quiesce().catch(() => {}).then(() => { for (const r of s.runIds) { hub.states.delete(r); hub.sim.forget(r); } });
+  const done = s.quiesce().catch(() => {}).then(() => hub.unload(s.runIds));
   return { id, done };
 }
 

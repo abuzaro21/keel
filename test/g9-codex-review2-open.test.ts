@@ -44,7 +44,7 @@ test('B: evicting a session mid-tick never runs work on dropped caches; late cal
       s.close();
       hub.sessions.delete(s.id);
       await s.quiesce();
-      for (const r of s.runIds) { hub.states.delete(r); hub.sim.forget(r); }
+      hub.unload(s.runIds);
       await new Promise((r) => setTimeout(r, 30)); // any straggler would now hit the dropped caches
       await assert.rejects(hub.submit(s.runIds[0], { t: 'operator', cmd: 'resume', at: s.tick }, s), SessionClosedError);
       await assert.rejects(s.injectShared({ tick: 0, fact: 'x', value: 1, real: true, obs: {} as never }), SessionClosedError);

@@ -34,7 +34,7 @@ Status: **not submitted.** Submission, public visibility, the hosted URL and the
 | Browser tests, desktop + phone | 10 / 10 | [evidence/test-e2e.txt](evidence/test-e2e.txt) |
 | SIGKILL + resume + takeover, Docker on Postgres | 0 duplicate effects; old instance 503 | [evidence/hosted-check.txt](evidence/hosted-check.txt) |
 | `npm audit --omit=dev` | 0 vulnerabilities | local run; CI job |
-| Independent review (Codex gpt-6.1-sol) | 3 rounds: 14, 3, then 4 findings; all fixed with regression tests | `test/g8-*`, `test/g9-*`, `test/g10-*` |
+| Independent review (Codex gpt-6.1-sol) | 4 rounds: 14, 3, 4, 3 findings; all fixed with regression tests | `test/g8-*` to `test/g11-*` |
 
 ## Honesty notes for the form
 

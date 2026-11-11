@@ -63,7 +63,7 @@ test('a view whose caches are dropped while it reads the store answers SessionCl
     const gate = new Promise<void>((r) => { release = r; });
     hub.store.rows = async (...a: Parameters<typeof rows>) => { await gate; return rows(...a); };
     const view = runView(hub, runId);
-    s.close(); hub.sessions.delete(s.id); hub.states.delete(runId); hub.sim.forget(runId); // what eviction does
+    s.close(); hub.sessions.delete(s.id); hub.unload(s.runIds); // what eviction does
     release();
     await assert.rejects(view, SessionClosedError);
   } finally { await hub.close(); }

@@ -89,6 +89,9 @@ export class Hub {
     return next;
   }
   /** Resolves when everything already queued for these runs has finished (used before evicting their caches). */
+  /** Drop every in-memory trace of these runs once their session has quiesced; the store keeps them. */
+  unload(runIds: string[]) { for (const r of runIds) { this.states.delete(r); this.chains.delete(r); this.sim.forget(r); } }
+
   async drain(runIds: string[]) {
     for (;;) { // a job that was already queued may queue more for another lane: wait until every chain is stable
       const seen = runIds.map((r) => this.chains.get(r));

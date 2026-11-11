@@ -30,7 +30,7 @@ free instance, two server processes writing the same database, and the demo leak
 ## Abuse limits (free instance)
 
 12 new runs per client key per minute and 120 overall; 40 sessions in memory (older ones are evicted and reload from the
-store on demand); 8 SSE streams per session and 200 overall; a slow SSE client is cut off past 1 MB of unsent data;
+store on demand; a slot is reserved before any database read, so a burst gets 503 rather than exceeding 40); 8 SSE streams per session and 200 overall; a slow SSE client is cut off past 1 MB of unsent data;
 60 injections and 60 commands per session; sessions older than `KEEL_RETENTION_DAYS` (default 7) are pruned.
 
 ### Client identity

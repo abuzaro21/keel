@@ -24,7 +24,13 @@ export class Sim {
     this.fx.set(runId, await this.store.effects(runId));
     if (!this.changes.has(session)) this.changes.set(session, await this.store.injections(session));
   }
-  forget(runId: string) { this.fx.delete(runId); }
+  /** Unload a run; the session's injections go with its last loaded run. */
+  forget(runId: string) {
+    const session = this.sessionOf.get(runId);
+    this.fx.delete(runId);
+    this.sessionOf.delete(runId);
+    if (session !== undefined && ![...this.sessionOf.values()].includes(session)) this.changes.delete(session);
+  }
   sessionFor(runId: string): string { return this.sessionOf.get(runId) ?? ''; }
 
   private effectsOf(runId: string): EffectRow[] {
