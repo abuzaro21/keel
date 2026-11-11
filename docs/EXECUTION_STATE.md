@@ -24,10 +24,10 @@ Update this file at every milestone. Another agent must be able to resume from i
 |---|---|---|
 | A source integrity | PASS | checkpoint `c731622`; only `E:\doo\keel` touched; no force push, no history rewrite |
 | B engine invariants | PASS | `npm test` (replay, crash-at-every-point, ack loss, SIGKILL) |
-| C database | PASS | 68/68 on SQLite and on Postgres 16; store contract (g7), fencing (g8/g9/g10), capacity (g11), export/import |
+| C database | PASS | 70/70 on SQLite and on Postgres 16; store contract (g7), fencing (g8/g9/g10), capacity (g11), export/import |
 | D scenarios | PASS | g3g4, R1-6 regression (a "stuck" report never counts as success) |
 | E browser | PASS | `docs/evidence/test-e2e.txt` 10/10 desktop + phone |
-| F security | PASS (local) | Codex reviews #1 (14), #2 (3), #3 (4: import fencing, eviction during start-up, evicted view 500, SSE test timing), release verification (3: session-capacity bypass under bursts, caches kept after eviction, render.yaml Postgres version) all fixed with regressions; CSP/nosniff; XFF policy tested; audit 0 vulns |
+| F security | PASS (local) | Codex reviews #1 (14), #2 (3), #3 (4: import fencing, eviction during start-up, evicted view 500, SSE test timing), release verification (3: session-capacity bypass under bursts, caches kept after eviction, render.yaml Postgres version; then 3 more: injection cache lost on crash, reservation leak on id failure, stale injection sequence during crash recovery) all fixed with regressions; CSP/nosniff; XFF policy tested; audit 0 vulns |
 | G deployment | READY, NOT DONE: owner approval | Render workspace "KEEL" exists and is empty (API, 2026-11-11); Docker hosted-check on Postgres; `render.yaml` + `docs/DEPLOY.md` |
 | H film | DONE (local) | `film/out/keel-film-final.mp4` 89.93 s, logo reveal ending; ASR + loudness + frame checks in `film/storyboard.md`; no human listening review yet |
 | I release | BLOCKED on push | `git push` was refused twice by the session's permission classifier ("Out-of-Place Publication") although the owner's directive authorizes pushing to the private repo; the owner runs the push (commands below) |

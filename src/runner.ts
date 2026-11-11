@@ -179,7 +179,8 @@ export class Hub {
   crashAndRecover(runId: string, session: Session): Promise<void> {
     return this.enqueue(runId, async () => {
       this.states.delete(runId);
-      this.sim.forget(runId);
+      // The simulated WORLD did not crash: load() re-reads this run's effects, and the session's injection cache is kept
+      // (dropping it here would let an injection that lands mid-reload rebuild it without the earlier ones).
       session.dropAgentTasks(runId);
       await this.load(runId, session.id);
       await this.process(runId, { t: 'recover', at: session.tick }, session);

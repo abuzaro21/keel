@@ -66,3 +66,55 @@ test('eviction leaves no mailbox, run mapping or injection cache behind', async 
     again.close();
   } finally { server.close(); await hub.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a crash mid-injection keeps every injection in the simulated world', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'keel-inj-'));
+  if (onPostgres) process.env.KEEL_PG_SCHEMA = freshSchema();
+  const { server, hub } = await startServer(0, onPostgres ? TEST_DB : join(dir, 'k.db'));
+  try {
+    const s = await Session.create(hub, 'inj', 'delivery', ['keel']); // one lane: nothing else keeps the session loaded
+    const inj = (fact: string) => ({ tick: 0, fact, value: 'closed', real: true, obs: {} as never });
+    await hub.sim.addInjection(s.id, inj('route:R2.status'));
+    const effects = hub.store.effects.bind(hub.store);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    hub.store.effects = async (...a: Parameters<typeof effects>) => { await gate; return effects(...a); };
+    const crash = hub.crashAndRecover(s.runIds[0], s);
+    await delay(20); // the reload is now waiting on the store
+    await hub.sim.addInjection(s.id, inj('route:R3.status'));
+    release();
+    await crash;
+    assert.deepEqual(hub.sim.injections(s.id).map((i) => i.fact), ['route:R2.status', 'route:R3.status']);
+    assert.equal((await hub.store.injections(s.id)).length, 2);
+    s.close();
+  } finally { server.close(); await hub.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an injection during crash recovery gets a fresh sequence number, so the agent accepts it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'keel-seq-'));
+  if (onPostgres) process.env.KEEL_PG_SCHEMA = freshSchema();
+  const { server, hub } = await startServer(0, onPostgres ? TEST_DB : join(dir, 'k.db'));
+  try {
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const post = (path: string, body: unknown) => fetch(`${base}${path}`, { method: 'POST', body: JSON.stringify(body) });
+    const { sessionId, runIds } = await (await post('/api/sessions', { scenario: 'delivery', policies: ['keel'] })).json();
+    const inject = (value: string) => post(`/api/sessions/${sessionId}/inject`, { fact: 'route:R3.status', value });
+    assert.equal((await inject('closed')).status, 202);
+    assert.equal((await inject('open')).status, 202);
+    const rows = hub.store.rows.bind(hub.store);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    hub.store.rows = async (...a: Parameters<typeof rows>) => { await gate; return rows(...a); }; // state is rebuilt from rows
+    const crash = post(`/api/sessions/${sessionId}/crash`, { runId: runIds[0] });
+    await delay(30); // the lane's state is gone and its reload waits on the store
+    const third = inject('closed');
+    await delay(30);
+    release();
+    assert.equal((await crash).status, 202);
+    assert.equal((await third).status, 202);
+    await hub.drain(runIds);
+    const seqs = hub.sim.injections(sessionId).map((i) => i.obs.seq);
+    assert.deepEqual(seqs, [...new Set(seqs)].sort((a, b) => a - b), `strictly increasing: ${seqs}`);
+    assert.equal(hub.state(runIds[0])!.world.facts['route:R3.status'], 'closed', 'the agent believes the latest report');
+  } finally { server.close(); await hub.close(); rmSync(dir, { recursive: true, force: true }); }
+});

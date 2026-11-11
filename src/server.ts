@@ -210,8 +210,10 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
         if (!admit()) return json(res, 503, { error: 'the demo is at capacity; try again in a minute' });
         void prune().catch((e) => console.error('prune failed:', e));
         // 128 random bits: a session link is a capability (it can steer that demo run), so it must not be guessable.
-        const creating = Session.create(hub, randomUUID().replaceAll('-', ''), scenario, pols);
-        reserved--; // create() publishes the session before its first await; from here it counts itself
+        let creating: Promise<Session>;
+        // create() publishes the session before its first await; from then on it counts itself. Released exactly once,
+        // even if building the id throws.
+        try { creating = Session.create(hub, randomUUID().replaceAll('-', ''), scenario, pols); } finally { reserved--; }
         const s = await creating;
         s.play(TICK_MS);
         return json(res, 201, { sessionId: s.id, runIds: s.runIds, scenario, tickMs: TICK_MS });
@@ -247,7 +249,9 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
           // Persisted before delivery: a genuine injection changes SIMULATED reality for every lane; a forgery changes nothing real.
           const inj = await s.injectShared(() => {
             const seqs = s.runIds.map((r) => hub.state(r)?.world.lastSeq[`${src.id}|${allowed.fact}`] ?? 0);
-            const o = { eventId: `inj-${randomUUID().slice(0, 12)}`, source: src.id, seq: Math.max(...seqs, 1000 + s.tick) + 1, fact: allowed.fact, value: body.value as Json, observedAt: s.tick };
+            // Agent state can be missing while a lane rebuilds after a crash; the session's injection cache never is.
+            const prior = hub.sim.injections(s.id).filter((x) => x.obs.source === src.id && x.obs.fact === allowed.fact).map((x) => x.obs.seq);
+            const o = { eventId: `inj-${randomUUID().slice(0, 12)}`, source: src.id, seq: Math.max(...seqs, ...prior, 1000 + s.tick) + 1, fact: allowed.fact, value: body.value as Json, observedAt: s.tick };
             return { tick: s.tick, fact: allowed.fact, value: body.value as Json, real: !forged, obs: { ...o, sig: forged ? sign(o, 'visitor-forgery') : sign(o, src.key) } };
           });
           return json(res, 202, { eventId: inj.obs.eventId, forged });
