@@ -4,6 +4,7 @@ services:
   - type: web
     name: keel
     runtime: docker
+    region: frankfurt   # same region as keel-db: the internal connection string only resolves there
     plan: free
     healthCheckPath: /api/health
     autoDeploy: false
@@ -17,4 +18,5 @@ services:
 databases:
   - name: keel-db
     plan: free
+    region: frankfurt
     postgresMajorVersion: "16"   # the version the suite is qualified on (CI service postgres:16)
