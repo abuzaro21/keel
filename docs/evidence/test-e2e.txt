@@ -1,13 +1,13 @@
-# npx playwright test (list reporter), 845becb
+# npx playwright test (list reporter), 292340a
 Running 10 tests using 2 workers
-  ok  2 [desktop] › e2e\keel.spec.ts:5:1 › delivery: first screen is a running plan; static learns too late, KEEL repairs and keeps finished work (3.5s)
-  ok  1 [mobile] › e2e\keel.spec.ts:5:1 › delivery: first screen is a running plan; static learns too late, KEEL repairs and keeps finished work (3.6s)
+  ok  1 [desktop] › e2e\keel.spec.ts:5:1 › delivery: first screen is a running plan; static learns too late, KEEL repairs and keeps finished work (3.5s)
+  ok  2 [mobile] › e2e\keel.spec.ts:5:1 › delivery: first screen is a running plan; static learns too late, KEEL repairs and keeps finished work (3.5s)
   ok  3 [desktop] › e2e\keel.spec.ts:21:1 › recovery: the in-flight failover is fenced before its effect (2.6s)
   ok  4 [mobile] › e2e\keel.spec.ts:21:1 › recovery: the in-flight failover is fenced before its effect (2.6s)
-  ok  5 [desktop] › e2e\keel.spec.ts:31:1 › adaptation failure: naive follows the flapping sensor; KEEL holds until an operator confirms (6.5s)
   ok  6 [mobile] › e2e\keel.spec.ts:31:1 › adaptation failure: naive follows the flapping sensor; KEEL holds until an operator confirms (6.5s)
-  ok  7 [desktop] › e2e\keel.spec.ts:45:1 › a visitor-forged event is rejected and changes nothing (433ms)
-  ok  8 [mobile] › e2e\keel.spec.ts:45:1 › a visitor-forged event is rejected and changes nothing (445ms)
-  ok  9 [desktop] › e2e\keel.spec.ts:52:1 › layout fits a phone: no horizontal page scroll (363ms)
-  ok 10 [mobile] › e2e\keel.spec.ts:52:1 › layout fits a phone: no horizontal page scroll (365ms)
-  10 passed (14.7s)
+  ok  5 [desktop] › e2e\keel.spec.ts:31:1 › adaptation failure: naive follows the flapping sensor; KEEL holds until an operator confirms (6.5s)
+  ok  8 [desktop] › e2e\keel.spec.ts:45:1 › a visitor-forged event is rejected and changes nothing (443ms)
+  ok  7 [mobile] › e2e\keel.spec.ts:45:1 › a visitor-forged event is rejected and changes nothing (463ms)
+  ok  9 [desktop] › e2e\keel.spec.ts:52:1 › layout fits a phone: no horizontal page scroll (370ms)
+  ok 10 [mobile] › e2e\keel.spec.ts:52:1 › layout fits a phone: no horizontal page scroll (403ms)
+  10 passed (14.6s)
