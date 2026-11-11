@@ -188,7 +188,7 @@ export class SqliteStore implements Store {
   }
   async prune(before: number) {
     const old = (this.db.prepare('SELECT session FROM runs GROUP BY session HAVING MAX(created) < ?').all(before) as { session: string }[]).map((r) => r.session);
-    this.tx(() => { for (const s of old) for (const t of ['runs', 'injections', 'world_clock']) this.db.prepare(`DELETE FROM ${t} WHERE session = ?`).run(s); }, false);
+    this.tx(() => { for (const s of old) for (const t of ['runs', 'injections', 'world_clock']) this.db.prepare(`DELETE FROM ${t} WHERE session = ?`).run(s); });
     return old.length;
   }
   async dump(): Promise<Dump> {
@@ -214,7 +214,7 @@ export class SqliteStore implements Store {
       for (const e of d.effects) this.db.prepare('INSERT INTO sim_effects (op_id, run_id, action, params, request_hash, tick, harm, applied, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(e.opId, e.runId, e.action, JSON.stringify(e.params), e.requestHash, e.tick, e.harm, JSON.stringify(e.applied), e.seq);
       for (const i of d.injections) this.db.prepare('INSERT INTO injections (session, seq, tick, fact, value, real, obs) VALUES (?, ?, ?, ?, ?, ?, ?)').run(i.session, i.seq, i.tick, i.fact, JSON.stringify(i.value), i.real ? 1 : 0, JSON.stringify(i.obs));
       for (const c of d.clocks) this.db.prepare('INSERT INTO world_clock (session, tick, updated) VALUES (?, ?, ?)').run(c.session, c.tick, Date.now());
-    }, false);
+    });
   }
   async close() { this.db.close(); }
 }
@@ -332,7 +332,7 @@ export class PgStore implements Store {
       const old = (await c.query(`SELECT session FROM ${S}.runs GROUP BY session HAVING MAX(created) < $1`, [before])).rows.map((x) => x.session);
       if (old.length) for (const t of ['runs', 'injections', 'world_clock']) await c.query(`DELETE FROM ${S}.${t} WHERE session = ANY($1)`, [old]);
       return old.length;
-    }, false);
+    });
   }
   async dump(): Promise<Dump> {
     // One REPEATABLE READ snapshot: every table is read as of the same instant, so run heads match their events.
@@ -360,7 +360,7 @@ export class PgStore implements Store {
       // keep BIGSERIAL sequences ahead of restored values
       await c.query(`SELECT setval(pg_get_serial_sequence('${S}.sim_effects', 'seq'), GREATEST((SELECT COALESCE(MAX(seq), 0) FROM ${S}.sim_effects), 1))`);
       await c.query(`SELECT setval(pg_get_serial_sequence('${S}.injections', 'seq'), GREATEST((SELECT COALESCE(MAX(seq), 0) FROM ${S}.injections), 1))`);
-    }, false);
+    });
   }
   async close() { await this.pool.end(); }
 }

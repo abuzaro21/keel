@@ -5,7 +5,7 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { Hub, Session } from './runner.ts';
+import { Hub, Session, SessionClosedError } from './runner.ts';
 import type { Row } from './store.ts';
 import { FencedError } from './store.ts';
 import { scenarios } from './scenarios.ts';
@@ -71,7 +71,8 @@ export function stepView(s: RunState) {
 }
 
 export async function runView(hub: Hub, runId: string) {
-  const s = hub.state(runId)!;
+  const s = hub.state(runId);
+  if (!s) throw new SessionClosedError(runId); // its caches were dropped (evicted) after the request looked it up
   return {
     runId, policy: s.policy, policyLabel: policies[s.policy].label, status: s.status, pause: s.pause, tick: s.tick,
     plan: { version: s.plan.version, steps: stepView(s) }, history: s.plans.map((p) => ({ version: p.version, steps: p.steps.map((x) => ({ id: x.id, sig: stepSig(x) })) })),
@@ -153,7 +154,15 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
     frames = frames.then(async () => {
       const subs = streams.get(sessionId);
       if (!subs?.size) return;
-      const data = await payload(hub, runId);
+      let data: View;
+      try { data = await payload(hub, runId); } catch (e) {
+        // Never advance a cursor past rows that were not sent: drop these connections instead. Each client reconnects
+        // with its Last-Event-ID and the catch-up backfills the missing rows from the store.
+        console.error('frame failed; closing streams for a backfill:', (e as Error).message);
+        for (const c of subs) { clearInterval(c.ping); c.res.destroy(); }
+        subs.clear();
+        return;
+      }
       for (const c of subs) send(c, runId, rows, data);
     }).catch((e) => console.error('frame failed:', e));
   };
@@ -255,6 +264,7 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
       if ((e as Error).message === 'body too large') return json(res, 413, { error: 'request body too large' });
       if (e instanceof SyntaxError) return json(res, 400, { error: 'malformed JSON' });
       if (e instanceof FencedError) return json(res, 503, { error: 'this instance has been replaced; reload the page' });
+      if (e instanceof SessionClosedError) return json(res, 409, { error: 'this run was unloaded meanwhile; reload the page' });
       console.error(e);
       json(res, 500, { error: 'internal error' });
     }
@@ -312,7 +322,7 @@ function evictOldest(hub: Hub, streams: Map<string, Set<Conn>>): { id: string; d
   hub.sessions.delete(id);
   for (const c of streams.get(id) ?? []) { clearInterval(c.ping); c.res.end(); }
   streams.delete(id); // the run stays in the store and can be reopened by id
-  const done = hub.drain(s.runIds).catch(() => {}).then(() => { for (const r of s.runIds) { hub.states.delete(r); hub.sim.forget(r); } });
+  const done = s.quiesce().catch(() => {}).then(() => { for (const r of s.runIds) { hub.states.delete(r); hub.sim.forget(r); } });
   return { id, done };
 }
 

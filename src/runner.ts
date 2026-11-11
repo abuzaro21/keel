@@ -36,6 +36,9 @@ export function feedObservations(S: Scenario): { tick: number; obs: Observation 
   return out;
 }
 
+/** The session was unloaded (evicted) or stopped while a request still held it: the caller should reload it by id. */
+export class SessionClosedError extends Error { constructor(id: string) { super(`session ${id} was unloaded`); } }
+
 export class Hub {
   store: Store; sim: Sim; planner: Planner;
   states = new Map<string, RunState>();
@@ -74,17 +77,28 @@ export class Hub {
     await this.sim.load(runId, session);
   }
 
-  /** Enqueue work on a run's mailbox; resolves when it (and everything it synchronously caused) is persisted and performed. */
-  private enqueue<T>(runId: string, job: () => Promise<T>): Promise<T> {
+  /**
+   * Enqueue work on a run's mailbox; resolves when it (and everything it synchronously caused) is persisted and performed.
+   * A closed session accepts no new work, so once it is closed its mailboxes can only drain.
+   */
+  private enqueue<T>(runId: string, job: () => Promise<T>, session: Session): Promise<T> {
+    if (this.fenced) return Promise.reject(this.fenced);
+    if (session.closed) return Promise.reject(new SessionClosedError(session.id));
     const next = (this.chains.get(runId) ?? Promise.resolve()).then(job);
     this.chains.set(runId, next.catch(() => {}));
     return next;
   }
   /** Resolves when everything already queued for these runs has finished (used before evicting their caches). */
-  async drain(runIds: string[]) { await Promise.all(runIds.map((r) => this.chains.get(r))); }
+  async drain(runIds: string[]) {
+    for (;;) { // a job that was already queued may queue more for another lane: wait until every chain is stable
+      const seen = runIds.map((r) => this.chains.get(r));
+      await Promise.all(seen);
+      if (runIds.every((r, i) => this.chains.get(r) === seen[i])) return;
+    }
+  }
 
   submit(runId: string, input: Ev, session: Session): Promise<void> {
-    return this.enqueue(runId, () => this.process(runId, input, session));
+    return this.enqueue(runId, () => this.process(runId, input, session), session);
   }
 
   /**
@@ -98,7 +112,7 @@ export class Hub {
       if (!input) return false;
       await this.process(runId, input, session);
       return true;
-    });
+    }, session);
   }
 
   private fence(e: FencedError) {
@@ -166,7 +180,7 @@ export class Hub {
       session.dropAgentTasks(runId);
       await this.load(runId, session.id);
       await this.process(runId, { t: 'recover', at: session.tick }, session);
-    });
+    }, session);
   }
 }
 
@@ -176,6 +190,9 @@ export class Session {
   private n = 0;
   private timer: NodeJS.Timeout | null = null;
   private busy = false;
+  /** The clock iteration in progress (eviction waits for it before dropping caches). */
+  private ticking: Promise<void> = Promise.resolve();
+  closed = false;
   private ms = 0;
   runIds: string[];
   hub: Hub; id: string; scenario: string; policyNames: PolicyName[];
@@ -271,6 +288,7 @@ export class Session {
   private injecting: Promise<unknown> = Promise.resolve();
   injectShared(i: Injection | (() => Injection)): Promise<Injection> {
     const job = this.injecting.then(async () => {
+      if (this.closed) throw new SessionClosedError(this.id);
       const inj = typeof i === 'function' ? i() : i;
       await this.hub.sim.addInjection(this.id, inj);
       await this.injectAll(inj.obs);
@@ -290,7 +308,7 @@ export class Session {
   }
 
   async runDue() {
-    while (this.queue.length && this.queue[0].tick <= this.tick) await this.queue.shift()!.fn();
+    while (!this.closed && this.queue.length && this.queue[0].tick <= this.tick) await this.queue.shift()!.fn();
   }
 
   /** Virtual time: advance tick by tick until nothing is left or `maxTick`. Deterministic. */
@@ -310,7 +328,7 @@ export class Session {
     this.timer = setInterval(() => {
       if (this.busy) return;
       this.busy = true;
-      void (async () => {
+      this.ticking = (async () => {
         try {
           await this.runDue();
           if ((this.tick >= maxTick) || (!this.queue.length && this.runIds.every((r) => this.settled(r)))) return this.stop();
@@ -321,7 +339,13 @@ export class Session {
   }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
   /** Stop for good (session evicted): new work no longer restarts the clock. */
-  close() { this.ms = 0; this.stop(); }
+  close() { this.closed = true; this.ms = 0; this.stop(); }
+  /** Resolves once nothing of this (closed) session can still touch its runs' caches. */
+  async quiesce() {
+    await this.ticking;
+    await this.injecting;
+    await this.hub.drain(this.runIds);
+  }
 
   settled(runId: string) {
     const s = this.hub.state(runId);
