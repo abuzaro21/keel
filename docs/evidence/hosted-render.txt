@@ -1,6 +1,7 @@
 # Hosted demo on Render, 2026-11-11 (UTC). Service srv-dbpuqijrjlhs73b67h60 (free, frankfurt, Docker), Postgres keel-db (free, PG 16, frankfurt).
 # Blueprint exs-dbpuomu7bikc73bg4ugg (autoSync off). Deploys of main 9cd55c5 (= v1.0.0 7541de0 + render.yaml region):
 #   dep-dbpuqirrjlhs73b67ig0 blueprint_sync live 04:22:22; dep-dbpurmrl550s73917hhg api live 04:24:30; dep-dbputgh5efls7394vk30 api live 04:28:12
+# Then main e35922c (+ security headers on every JSON response, PR #4): dep-dbpv2sou01pc739b30e0 api live 04:39:43 (current).
 
 ## GET https://keel-1myw.onrender.com/api/health
 {"ok":true,"store":"postgres","sessions":4}
@@ -25,6 +26,24 @@ SESSION b3774033f0e540feaa054b5b50d98cba
 04:30:05 reload after restart: 200 keel:completed goalMet=true dup=0 | static:completed goalMet=false dup=0 store postgres
 04:30:05 reload after restart: 200 keel:completed goalMet=true dup=0 | static:completed goalMet=false dup=0 store postgres
 04:30:06 reload after restart: 200 keel:completed goalMet=true dup=0 | static:completed goalMet=false dup=0 store postgres
+
+## On e35922c (current deploy): smoke test again, then sessions from earlier instances reloaded after a third redeploy
+04:39:46 scenarios: 200 delivery,recovery,flapping tickMs 900
+04:39:46 create: 201 6d21c3b35e9a4012ad2fb30287369d7c 6d21c3b35e9a4012ad2fb30287369d7c-static,6d21c3b35e9a4012ad2fb30287369d7c-keel
+04:39:46 sse: 200 text/event-stream
+04:39:49 inject genuine: 202
+04:39:49 inject forged: {"eventId":"inj-94e48c0e-5c2","forged":true}
+04:39:49 bad inject: 400
+04:39:49 crash keel lane: 202
+04:39:55 sse result: {"frames":46,"rows":65}
+04:40:06 static: completed goalMet=false dup=0 recovered=0 stale=0 rejected=1 | truck T1 dispatched onto closed route R1: stuck at the closure; the customer was told it was on time
+04:40:06 keel: completed goalMet=true dup=0 recovered=2 stale=0 rejected=1 | order #1042 delivered via R2 in 55 min (SLA 70, cold-hold 90)
+04:40:06 store postgres
+04:40:06 export: 200 application/json 39990 bytes
+04:40:06 headers: {"content-security-policy":"default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'","referrer-policy":"no-referrer","x-content-type-options":"nosniff"}
+SESSION 6d21c3b35e9a4012ad2fb30287369d7c
+04:40:06 reload after restart: 200 keel:completed goalMet=true dup=0 | static:completed goalMet=false dup=0 store postgres
+04:40:06 reload after restart: 200 keel:completed goalMet=true dup=0 | static:completed goalMet=false dup=0 store postgres
 
 ## App logs checked: startup lines and one expected SSE backfill notice; no connection string, password or token logged.
 ## Not shown on Render: a takeover in the middle of a run (each redeploy finished before or after the observed runs). The
