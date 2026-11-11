@@ -6,6 +6,8 @@ import type { AddressInfo } from 'node:net';
 process.env.KEEL_TICK_MS = '20';
 process.env.KEEL_PLANNER = 'search';
 const { startServer } = await import('../src/server.ts');
+const { TEST_DB, onPostgres, freshSchema } = await import('./helpers.ts');
+const TEST_DB_TARGET = () => { if (onPostgres) process.env.KEEL_PG_SCHEMA = freshSchema(); return TEST_DB; };
 
 type Frame = { id: string | null; data: { runId: string; rows: { n: number }[]; view: { status: string } } };
 async function readFrames(url: string, headers: Record<string, string>, until: (f: Frame[]) => boolean, ms = 8000): Promise<Frame[]> {
@@ -31,7 +33,7 @@ async function readFrames(url: string, headers: Record<string, string>, until: (
 }
 
 test('SSE: a reconnect with Last-Event-ID resumes after the cursor, with no duplicated rows', async () => {
-  const { server } = startServer(0);
+  const { server, hub } = await startServer(0, TEST_DB_TARGET());
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
     const s = await (await fetch(`${base}/api/sessions`, { method: 'POST', body: JSON.stringify({ scenario: 'delivery' }) })).json();
@@ -42,11 +44,11 @@ test('SSE: a reconnect with Last-Event-ID resumes after the cursor, with no dupl
     const second = await readFrames(`${base}/api/sessions/${s.sessionId}/stream`, { 'last-event-id': lastId }, (f) => f.filter((x) => x.data.view.status === 'completed').length >= 2);
     const cursor = new URLSearchParams(lastId);
     for (const f of second) for (const r of f.data.rows) assert.ok(r.n > Number(cursor.get(f.data.runId)), `row ${r.n} of ${f.data.runId} was already delivered before the cursor`);
-  } finally { server.close(); }
+  } finally { server.close(); await hub.close(); }
 });
 
 test('API: only allow-listed observations are injectable; bad bodies are 400; static paths cannot escape', async () => {
-  const { server } = startServer(0);
+  const { server, hub } = await startServer(0, TEST_DB_TARGET());
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
     const s = await (await fetch(`${base}/api/sessions`, { method: 'POST', body: JSON.stringify({ scenario: 'delivery' }) })).json();
@@ -60,5 +62,5 @@ test('API: only allow-listed observations are injectable; bad bodies are 400; st
       const text = await r.text();
       assert.ok(!text.includes('"name": "keel"') && !text.includes('startServer'), `${p} leaked a file`);
     }
-  } finally { server.close(); }
+  } finally { server.close(); await hub.close(); }
 });

@@ -1,19 +1,23 @@
 // Imperative shell around the pure engine: persists [input, ...decisions], performs the I/O decisions ask for,
 // and runs the SIMULATED world clock. The clock schedules world events and effect completions; it never
 // asks the agent to re-think — the agent only reacts to the inputs those produce.
+//
+// Concurrency: each run has a mailbox (a promise chain). Inputs for one run are processed strictly one at a time:
+// decide -> append to the store (awaited, head-checked) -> perform. Nothing for that run can interleave between the
+// engine's final check (`commit_effect`) and the simulated effect. Different runs proceed independently.
 import { decide, reduce, fold, policies, startContext } from './engine.ts';
 import type { Ev, PolicyName, RunState } from './engine.ts';
 import { scenarios } from './scenarios.ts';
 import type { FeedItem, Scenario } from './scenarios.ts';
 import { sign } from './world.ts';
 import type { Observation } from './world.ts';
-import { Store } from './store.ts';
-import type { Row } from './store.ts';
+import { openStore } from './store.ts';
+import type { EffectRow, Injection, Row, Store } from './store.ts';
 import { Sim } from './sim.ts';
 import type { Faults } from './sim.ts';
 import { Planner } from './planner.ts';
 
-type Task = { tick: number; pri: number; seq: number; runId: string | null; fn: () => void };
+type Task = { tick: number; pri: number; seq: number; runId: string | null; fn: () => Promise<void> | void };
 export type Listener = (rows: Row[]) => void;
 
 /** Turn a scenario feed into signed observations. Identical objects go to every policy's run. */
@@ -37,44 +41,65 @@ export class Hub {
   listeners = new Set<Listener>();
   /** Presentation only: told when a session's world clock advances (the agent is never told). */
   tickListeners = new Set<(session: Session) => void>();
+  private chains = new Map<string, Promise<void>>();
   /** Test-only crash injection: SIGKILL this process around the effect boundary of one effect key. */
   failpoint: string | null = process.env.KEEL_FAILPOINT ?? null;
   failEffect: string | null = process.env.KEEL_FAILPOINT_EFFECT ?? null;
 
-  constructor(dbPath = ':memory:', faults: Faults = {}) {
-    this.store = new Store(dbPath);
-    this.sim = new Sim(this.store, faults);
+  private constructor(store: Store, faults: Faults) {
+    this.store = store;
+    this.sim = new Sim(store, faults);
     this.planner = new Planner();
   }
+  static async open(target?: string, faults: Faults = {}, schema?: string): Promise<Hub> {
+    return new Hub(await openStore(target, schema), faults);
+  }
+  async close() { for (const s of this.sessions.values()) s.close(); await this.store.close(); }
 
-  state(runId: string): RunState | null {
-    let s = this.states.get(runId);
-    if (!s) {
-      const evs = this.store.events(runId);
-      if (!evs.length) return null;
-      s = fold(evs);
-      this.states.set(runId, s);
-    }
-    return s;
+  /** The cached state of a loaded run (null if the run has no events yet). */
+  state(runId: string): RunState | null { return this.states.get(runId) ?? null; }
+
+  /** (Re)build a run's state and simulator view from the store — exactly what a restarted process does. */
+  async load(runId: string, session: string) {
+    const rows = await this.store.rows(runId);
+    if (rows.length) this.states.set(runId, fold(rows.map((r) => r.ev))); else this.states.delete(runId);
+    await this.sim.load(runId, session);
   }
 
-  /** Process one input and everything it synchronously causes, one at a time (single writer per run). */
-  submit(runId: string, input: Ev, session: Session) {
+  /** Enqueue work on a run's mailbox; resolves when it (and everything it synchronously caused) is persisted and performed. */
+  private enqueue(runId: string, job: () => Promise<void>): Promise<void> {
+    const next = (this.chains.get(runId) ?? Promise.resolve()).then(job);
+    this.chains.set(runId, next.catch(() => {}));
+    return next;
+  }
+
+  submit(runId: string, input: Ev, session: Session): Promise<void> {
+    return this.enqueue(runId, () => this.process(runId, input, session));
+  }
+
+  private async process(runId: string, input: Ev, session: Session) {
     const q: Ev[] = [input];
     while (q.length) {
       const inp = q.shift()!;
       const st = this.state(runId);
       const decisions = decide(st, inp);
-      const rows = this.store.append(runId, st?.seq ?? 0, [inp, ...decisions], session.tick);
+      let rows: Row[];
+      try {
+        rows = await this.store.append(runId, st?.seq ?? 0, [inp, ...decisions], session.tick);
+      } catch (e) {
+        this.states.delete(runId); // never act on a state the store rejected; the next input reloads from the log
+        await this.load(runId, session.id);
+        throw e;
+      }
       let s = st;
       for (const r of rows) s = reduce(s, r.ev);
       this.states.set(runId, s!);
       for (const l of this.listeners) l(rows);
-      for (const d of decisions) this.perform(runId, d, s!, q, session);
+      for (const d of decisions) await this.perform(runId, d, s!, q, session);
     }
   }
 
-  private perform(runId: string, d: Ev, s: RunState, q: Ev[], session: Session) {
+  private async perform(runId: string, d: Ev, s: RunState, q: Ev[], session: Session) {
     const at = session.tick;
     switch (d.t) {
       case 'dispatch':
@@ -84,14 +109,15 @@ export class Hub {
         const row = s.ledger[d.opId];
         const die = (point: string) => { if (this.failpoint === point && (!this.failEffect || this.failEffect === row.effectKey)) process.kill(process.pid, 'SIGKILL'); };
         die('before_effect');
-        // No await between the engine's final fence check (commit_effect) and the effect: nothing can interleave.
-        const r = this.sim.execute(runId, scenarios[s.scenario], row.opId, row.action, row.params, d.expect, row.effectKey, at);
+        const r = await this.sim.execute(runId, scenarios[s.scenario], row.opId, row.action, row.params, d.expect, row.effectKey, at);
         die('after_effect');
+        const applied = this.sim.effectRows(runId).find((e) => e.opId === row.opId);
+        if (applied) session.scheduleReports(runId, applied);
         q.push(r.kind === 'receipt' ? { t: 'receipt', opId: row.opId, gen: d.gen, applied: r.applied, at, detail: r.detail } : { t: 'effect_uncertain', opId: row.opId, gen: d.gen, at });
         break;
       }
       case 'reconcile_requested': {
-        const l = this.sim.lookup(d.opId);
+        const l = await this.sim.lookup(runId, d.opId);
         q.push({ t: 'reconciled', opId: d.opId, gen: d.gen, found: l.found, applied: l.applied, at });
         break;
       }
@@ -101,11 +127,15 @@ export class Hub {
     }
   }
 
-  /** Simulated agent crash: all in-memory agent state and agent timers for the run are dropped, then rebuilt from the log. */
-  crashAndRecover(runId: string, session: Session) {
-    this.states.delete(runId);
-    session.dropAgentTasks(runId);
-    this.submit(runId, { t: 'recover', at: session.tick }, session);
+  /** Simulated agent crash: in-memory agent state and agent timers for the run are dropped, then rebuilt from the store. */
+  crashAndRecover(runId: string, session: Session): Promise<void> {
+    return this.enqueue(runId, async () => {
+      this.states.delete(runId);
+      this.sim.forget(runId);
+      session.dropAgentTasks(runId);
+      await this.load(runId, session.id);
+      await this.process(runId, { t: 'recover', at: session.tick }, session);
+    });
   }
 }
 
@@ -114,19 +144,28 @@ export class Session {
   private queue: Task[] = [];
   private n = 0;
   private timer: NodeJS.Timeout | null = null;
+  private busy = false;
   private ms = 0;
   runIds: string[];
   hub: Hub; id: string; scenario: string; policyNames: PolicyName[];
 
   constructor(hub: Hub, id: string, scenario: string, policyNames: PolicyName[]) {
     this.hub = hub; this.id = id; this.scenario = scenario; this.policyNames = policyNames;
-    if (!scenarios[scenario]) throw new Error(`unknown scenario ${scenario}`);
-    for (const p of policyNames) if (!policies[p]) throw new Error(`unknown policy ${p}`);
+    if (!Object.hasOwn(scenarios, scenario)) throw new Error(`unknown scenario ${scenario}`);
+    for (const p of policyNames) if (!Object.hasOwn(policies, p)) throw new Error(`unknown policy ${p}`);
+    if (new Set(policyNames).size !== policyNames.length) throw new Error('duplicate policy');
     this.runIds = policyNames.map((p) => `${id}-${p}`);
     hub.sessions.set(id, this);
   }
 
-  schedule(tick: number, pri: number, runId: string | null, fn: () => void) {
+  /** Create and start a session: one run per policy, sharing one world feed. */
+  static async create(hub: Hub, id: string, scenario: string, policyNames: PolicyName[]): Promise<Session> {
+    const s = new Session(hub, id, scenario, policyNames);
+    await s.start();
+    return s;
+  }
+
+  schedule(tick: number, pri: number, runId: string | null, fn: () => Promise<void> | void) {
     this.queue.push({ tick, pri, seq: this.n++, runId, fn });
     this.queue.sort((a, b) => a.tick - b.tick || a.pri - b.pri || a.seq - b.seq);
     if (this.ms && !this.timer) this.play(this.ms); // new work (e.g. after an operator resume) restarts a settled clock
@@ -134,65 +173,105 @@ export class Session {
   dropAgentTasks(runId: string) { this.queue = this.queue.filter((t) => t.runId !== runId || t.pri === 0); }
 
   /** Start every policy's run and schedule the shared world feed (priority 0: world events land before effect completions in a tick). */
-  start() {
+  async start() {
     const S = scenarios[this.scenario];
-    this.policyNames.forEach((p, i) => {
+    await this.hub.store.setClock(this.id, 0);
+    for (const [i, p] of this.policyNames.entries()) {
       const runId = this.runIds[i];
-      this.hub.store.createRun(runId, this.id, this.scenario, p);
-      this.hub.submit(runId, { t: 'start', runId, scenario: this.scenario, context: startContext(this.scenario, p), at: 0 }, this);
-    });
+      await this.hub.store.createRun({ runId, session: this.id, scenario: this.scenario, policy: p });
+      await this.hub.sim.load(runId, this.id);
+      await this.hub.submit(runId, { t: 'start', runId, scenario: this.scenario, context: startContext(this.scenario, p), at: 0 }, this);
+    }
     for (const { tick, obs } of feedObservations(S)) {
       for (const runId of this.runIds) this.schedule(tick, 0, null, () => this.inject(runId, obs));
     }
     return this;
   }
 
-  /** Rebuild a session after the process died: clock from the log, undelivered world events rescheduled, every run recovered. */
-  static resume(hub: Hub, id: string): Session {
-    const runs = hub.store.runs(id);
+  /** Rebuild a session after the process died: clock from the store, undelivered world events rescheduled, every run recovered. */
+  static async resume(hub: Hub, id: string): Promise<Session> {
+    const runs = await hub.store.runs(id);
     if (!runs.length) throw new Error(`no session ${id}`);
     const s = new Session(hub, id, runs[0].scenario, runs.map((r) => r.policy as PolicyName));
-    s.tick = Math.max(...runs.map((r) => hub.store.rows(r.runId).at(-1)?.tick ?? 0));
+    const lastRowTick = Math.max(0, ...(await Promise.all(runs.map(async (r) => (await hub.store.rows(r.runId)).at(-1)?.tick ?? 0))));
+    s.tick = Math.max(lastRowTick, await hub.store.clock(id));
     for (const r of runs) {
-      const delivered = hub.store.events(r.runId).flatMap((e) => (e.t === 'observation' ? [e.obs.eventId] : []));
-      for (const { tick, obs } of feedObservations(scenarios[s.scenario])) {
+      await hub.load(r.runId, id);
+      const delivered = (await hub.store.rows(r.runId)).flatMap((x) => (x.ev.t === 'observation' ? [x.ev.obs.eventId] : []));
+      const deliver = (tick: number, obs: Observation) => {
         const i = delivered.indexOf(obs.eventId);
-        if (i >= 0) { delivered.splice(i, 1); continue; }
+        if (i >= 0) { delivered.splice(i, 1); return; }
         s.schedule(Math.max(tick, s.tick), 0, null, () => s.inject(r.runId, obs));
-      }
-      hub.states.delete(r.runId);
-      hub.submit(r.runId, { t: 'recover', at: s.tick }, s);
+      };
+      for (const { tick, obs } of feedObservations(scenarios[s.scenario])) deliver(tick, obs);
+      for (const inj of hub.sim.injections(id)) deliver(inj.tick, inj.obs); // a crash mid fan-out cannot starve one lane
+      for (const e of hub.sim.effectRows(r.runId)) s.scheduleReports(r.runId, e, delivered); // undelivered world reports
+      const st = hub.state(r.runId);
+      if (st && st.status !== 'completed' && st.status !== 'stopped') await hub.submit(r.runId, { t: 'recover', at: s.tick }, s);
     }
     return s;
   }
 
-  inject(runId: string, obs: Observation) { this.hub.submit(runId, { t: 'observation', obs, at: this.tick }, this); }
-  injectAll(obs: Observation) { for (const r of this.runIds) this.inject(r, obs); }
+  /** World-side reports about an applied effect (e.g. carrier arrival), delivered at their due tick. Idempotent. */
+  private reported = new Set<string>();
+  scheduleReports(runId: string, e: EffectRow, alreadyDelivered: string[] = []) {
+    const S = scenarios[this.scenario];
+    const truthAt = (t: number) => this.hub.sim.truth(runId, S, t);
+    (S.reports?.(e, truthAt) ?? []).forEach((r, i) => {
+      const eventId = `report-${e.opId}-${i}`;
+      if (this.reported.has(eventId)) return;
+      this.reported.add(eventId);
+      if (alreadyDelivered.includes(eventId)) return;
+      this.schedule(Math.max(r.tick, this.tick), 0, null, () => {
+        const body = { eventId, source: r.source, seq: this.tick + 1, fact: r.fact, value: r.value(truthAt), observedAt: this.tick };
+        return this.inject(runId, { ...body, sig: sign(body, S.sources[r.source].key) });
+      });
+    });
+  }
 
-  advanceClock() { this.tick++; this.hub.store.setClock(this.id, this.tick); for (const l of this.hub.tickListeners) l(this); }
+  /** A visitor injection: persisted first (with its signed envelope), then delivered to every lane. Recovery re-delivers missing copies. */
+  async injectShared(i: Injection) {
+    await this.hub.sim.addInjection(this.id, i);
+    await this.injectAll(i.obs);
+  }
 
-  runDue() {
-    while (this.queue.length && this.queue[0].tick <= this.tick) this.queue.shift()!.fn();
+  inject(runId: string, obs: Observation) { return this.hub.submit(runId, { t: 'observation', obs, at: this.tick }, this); }
+  async injectAll(obs: Observation) { for (const r of this.runIds) await this.inject(r, obs); }
+
+  async advanceClock() {
+    this.tick++;
+    await this.hub.store.setClock(this.id, this.tick);
+    for (const l of this.hub.tickListeners) l(this);
+  }
+
+  async runDue() {
+    while (this.queue.length && this.queue[0].tick <= this.tick) await this.queue.shift()!.fn();
   }
 
   /** Virtual time: advance tick by tick until nothing is left or `maxTick`. Deterministic. */
-  runToEnd(maxTick = 80) {
+  async runToEnd(maxTick = 80) {
     while (this.tick <= maxTick) {
-      this.runDue();
+      await this.runDue();
       if (!this.queue.length && this.runIds.every((r) => this.settled(r))) break;
-      this.advanceClock();
+      await this.advanceClock();
     }
     return this;
   }
 
-  /** Real time for the live demo: one tick every `ms`. */
+  /** Real time for the live demo: one tick every `ms` (a tick never overlaps the previous one). */
   play(ms: number, maxTick = 200) {
     this.stop();
     this.ms = ms;
     this.timer = setInterval(() => {
-      this.runDue();
-      if ((this.tick >= maxTick) || (!this.queue.length && this.runIds.every((r) => this.settled(r)))) return this.stop();
-      this.advanceClock();
+      if (this.busy) return;
+      this.busy = true;
+      void (async () => {
+        try {
+          await this.runDue();
+          if ((this.tick >= maxTick) || (!this.queue.length && this.runIds.every((r) => this.settled(r)))) return this.stop();
+          await this.advanceClock();
+        } catch (e) { console.error(`session ${this.id}:`, e); this.stop(); } finally { this.busy = false; }
+      })();
     }, ms);
   }
   stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }

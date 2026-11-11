@@ -9,19 +9,23 @@ import { Hub, Session } from '../src/runner.ts';
 import { decide, fold, reduce, INPUTS, startContext } from '../src/engine.ts';
 import type { Ev, RunState } from '../src/engine.ts';
 import { runMetrics } from '../src/metrics.ts';
+import { scenarios } from '../src/scenarios.ts';
+import { openHub, events, onPostgres, TEST_DB, freshSchema } from './helpers.ts';
 
 process.env.KEEL_PLANNER = 'search'; // deterministic search only; recorded model output is covered in g5-planner.test.ts
 
-const run = (scenario: string, policies: ('keel' | 'static' | 'naive')[], hub = new Hub()) => {
-  const s = new Session(hub, scenario, scenario, policies).start().runToEnd();
+const run = async (scenario: string, policies: ('keel' | 'static' | 'naive')[], hubIn?: Hub) => {
+  const hub = hubIn ?? await openHub();
+  const s = await (await Session.create(hub, scenario, scenario, policies)).runToEnd();
   return { hub, s };
 };
+const head = (hub: Hub, runId: string) => hub.state(runId)?.seq ?? 0;
 
-test('replay: re-deciding every recorded input reproduces every recorded decision exactly', () => {
+test('replay: re-deciding every recorded input reproduces every recorded decision exactly', async () => {
   for (const sc of ['delivery', 'recovery', 'flapping']) {
-    const { hub, s } = run(sc, ['keel', 'static', 'naive']);
+    const { hub, s } = await run(sc, ['keel', 'static', 'naive']);
     for (const runId of s.runIds) {
-      const evs = hub.store.events(runId);
+      const evs = (await events(hub, runId));
       let st: RunState | null = null;
       for (let i = 0; i < evs.length;) {
         const input = evs[i];
@@ -37,55 +41,57 @@ test('replay: re-deciding every recorded input reproduces every recorded decisio
   }
 });
 
-test('in-process crash at every point of the delivery run: no duplicate effects, same outcome', () => {
-  const ref = run('delivery', ['keel']);
-  const refMetrics = runMetrics(ref.hub.store, ref.hub.sim, 'delivery-keel');
-  const total = ref.hub.store.head('delivery-keel');
+test('in-process crash at every point of the delivery run: no duplicate effects, same outcome', async () => {
+  const ref = await run('delivery', ['keel']);
+  const refMetrics = await runMetrics(ref.hub.store, ref.hub.sim, 'delivery-keel');
+  const total = head(ref.hub, 'delivery-keel');
   for (let crashAt = 2; crashAt < total; crashAt++) {
-    const hub = new Hub();
-    const s = new Session(hub, 'delivery', 'delivery', ['keel']).start();
-    while (s.tick < 40 && hub.store.head('delivery-keel') < crashAt) { s.runDue(); s.tick++; }
-    hub.crashAndRecover('delivery-keel', s);
-    s.runToEnd();
-    const m = runMetrics(hub.store, hub.sim, 'delivery-keel');
+    const hub = await openHub();
+    const s = await Session.create(hub, 'delivery', 'delivery', ['keel']);
+    while (s.tick < 40 && head(hub, 'delivery-keel') < crashAt) { await s.runDue(); await s.advanceClock(); }
+    await hub.crashAndRecover('delivery-keel', s);
+    await s.runToEnd();
+    const m = await runMetrics(hub.store, hub.sim, 'delivery-keel');
     assert.equal(m.duplicateEffects, 0, `crash before event ${crashAt}`);
     assert.equal(m.goalMet, true, `crash before event ${crashAt}: ${m.truth}`);
     assert.equal(m.revisions, refMetrics.revisions);
   }
 });
 
-test('ambiguous acknowledgement: the effect applied but the ack was lost; reconciliation finds it, no repeat', () => {
-  const hub = new Hub(':memory:', { dropAckOnce: ['dispatch:1042', 'snapshot_db'] });
-  for (const sc of ['delivery', 'recovery']) new Session(hub, sc, sc, ['keel']).start().runToEnd();
+test('ambiguous acknowledgement: the effect applied but the ack was lost; reconciliation finds it, no repeat', async () => {
+  const hub = await openHub({ dropAckOnce: ['dispatch:1042', 'snapshot_db'] });
+  for (const sc of ['delivery', 'recovery']) await (await Session.create(hub, sc, sc, ['keel'])).runToEnd();
   for (const r of ['delivery-keel', 'recovery-keel']) {
-    const evs = hub.store.events(r);
+    const evs = (await events(hub, r));
     assert.ok(evs.some((e) => e.t === 'effect_uncertain'), `${r} saw an uncertain effect`);
     assert.ok(evs.some((e) => e.t === 'reconciled' && e.found === 'yes'));
-    const m = runMetrics(hub.store, hub.sim, r);
+    const m = await runMetrics(hub.store, hub.sim, r);
     assert.equal(m.duplicateEffects, 0);
     assert.equal(m.goalMet, true);
   }
 });
 
-test('stream append is optimistic: a writer with a stale head is refused', () => {
-  const { hub } = run('delivery', ['keel']);
-  const h = hub.store.head('delivery-keel');
-  assert.throws(() => hub.store.append('delivery-keel', h - 1, [{ t: 'recover', at: 99 }], 99), /stream conflict/);
+test('stream append is optimistic: a writer with a stale head is refused', async () => {
+  const { hub } = await run('delivery', ['keel']);
+  const h = head(hub, 'delivery-keel');
+  await assert.rejects(hub.store.append('delivery-keel', h - 1, [{ t: 'recover', at: 99 }], 99), /stream conflict/);
+  await assert.rejects(hub.store.append('delivery-keel', h + 1, [{ t: 'recover', at: 99 }], 99), /stream conflict/);
 });
 
-// Real process death: SIGKILL inside the effect boundary, then a fresh process recovers from the SQLite file.
+// Real process death: SIGKILL inside the effect boundary, then a fresh process recovers from the store (SQLite file or Postgres).
 for (const failpoint of ['before_effect', 'after_effect']) {
-  test(`real SIGKILL ${failpoint.replace('_', ' ')}: recovery from SQLite applies dispatch exactly once`, () => {
+  test(`real SIGKILL ${failpoint.replace('_', ' ')}: a fresh process recovers from ${onPostgres ? 'PostgreSQL' : 'SQLite'}; dispatch applied exactly once`, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'keel-crash-'));
-    const db = join(dir, 'keel.db');
+    const target = onPostgres ? TEST_DB : join(dir, 'keel.db');
+    const env = { ...process.env, KEEL_PG_SCHEMA: freshSchema() };
     try {
-      const child = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', 'test/fixtures/crash-child.ts', db, 'run'], {
-        env: { ...process.env, KEEL_FAILPOINT: failpoint, KEEL_FAILPOINT_EFFECT: 'dispatch:1042' }, encoding: 'utf8',
+      const child = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', 'test/fixtures/crash-child.ts', target, 'run'], {
+        env: { ...env, KEEL_FAILPOINT: failpoint, KEEL_FAILPOINT_EFFECT: 'dispatch:1042' }, encoding: 'utf8',
       });
       assert.notEqual(child.status, 0, `child should have been killed: ${child.stderr}`);
-      const rec = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', 'test/fixtures/crash-child.ts', db, 'recover'], { encoding: 'utf8' });
+      const rec = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', 'test/fixtures/crash-child.ts', target, 'recover'], { env, encoding: 'utf8' });
       assert.equal(rec.status, 0, rec.stderr);
-      const m = JSON.parse(rec.stdout.trim().split('\n').at(-1)!);
+      const m = JSON.parse(rec.stdout.trim().split(/\r?\n/).at(-1)!);
       assert.equal(m.duplicateEffects, 0);
       assert.equal(m.goalMet, true, m.truth);
       assert.ok(m.sawRecover);
@@ -93,13 +99,15 @@ for (const failpoint of ['before_effect', 'after_effect']) {
   });
 }
 
-test('a run with no incoming events does no planning, however long the clock runs', () => {
-  const hub = new Hub();
-  const s = new Session(hub, 'quiet', 'delivery', ['keel']);
-  hub.store.createRun('quiet-keel', 'quiet', 'delivery', 'keel');
-  hub.submit('quiet-keel', { t: 'start', runId: 'quiet-keel', scenario: 'delivery', context: startContext('delivery', 'keel'), at: 0 }, s);
-  s.runToEnd(200);
-  const kinds = hub.store.events('quiet-keel').map((e: Ev) => e.t);
+test('a run with no incoming events does no planning, however long the clock runs', async () => {
+  scenarios.quiet = { ...scenarios.delivery, id: 'quiet', truth: [], feed: [] }; // nothing ever changes in this world
+  const hub = await openHub();
+  const s = new Session(hub, 'quiet', 'quiet', ['keel']);
+  await hub.store.createRun({ runId: 'quiet-keel', session: 'quiet', scenario: 'quiet', policy: 'keel' });
+  await hub.sim.load('quiet-keel', 'quiet');
+  await hub.submit('quiet-keel', { t: 'start', runId: 'quiet-keel', scenario: 'quiet', context: startContext('quiet', 'keel'), at: 0 }, s);
+  await s.runToEnd(200);
+  const kinds = (await events(hub, 'quiet-keel')).map((e: Ev) => e.t);
   assert.ok(!kinds.includes('repair_requested'));
   assert.ok(!kinds.includes('revision'));
   assert.equal(hub.state('quiet-keel')!.status, 'completed');

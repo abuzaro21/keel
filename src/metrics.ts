@@ -24,14 +24,15 @@ export type RunMetrics = {
   latency: { eventId: string; ingressToDetectMs: number; ingressToCommitMs: number | null; eventToDetectTicks: number; eventToCommitTicks: number | null }[];
 };
 
-export function runMetrics(store: Store, sim: Sim, runId: string): RunMetrics {
-  const rows = store.rows(runId);
+export async function runMetrics(store: Store, sim: Sim, runId: string): Promise<RunMetrics> {
+  const rows = await store.rows(runId);
   const start = rows[0]?.ev;
   if (!start || start.t !== 'start') throw new Error(`no run ${runId}`);
   const S = scenarios[start.scenario];
   const evs = rows.map((r) => r.ev);
   const revs = evs.flatMap((e) => (e.t === 'revision' ? [e.record as RevisionRecord] : []));
-  const lastTick = Math.max(rows.at(-1)!.tick, store.clock(runId));
+  const session = sim.sessionFor(runId);
+  const lastTick = Math.max(rows.at(-1)!.tick, await store.clock(session));
   const out = sim.outcome(runId, S, lastTick);
   const effects = sim.effects(runId);
   const keys = effects.map((e) => contract(S.domain, e.action).effectKey(e.params));

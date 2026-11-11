@@ -3,11 +3,12 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { Hub, Session } from './runner.ts';
 import type { Row } from './store.ts';
 import { scenarios } from './scenarios.ts';
-import { policies, remainingOf } from './engine.ts';
+import { policies } from './engine.ts';
 import type { PolicyName, RunState } from './engine.ts';
 import { contract, evalCond, stepSig } from './model.ts';
 import { runMetrics } from './metrics.ts';
@@ -15,11 +16,16 @@ import { sign } from './world.ts';
 import type { Json } from './model.ts';
 
 export const TICK_MS = Number(process.env.KEEL_TICK_MS ?? 900);
-const MAX_SESSIONS = 40;
+const MAX_SESSIONS = 40;            // sessions kept in memory (all of them stay in the store)
 const MAX_STREAMS_PER_SESSION = 8;
 const MAX_STREAMS = 200;
 const MAX_INJECTIONS_PER_SESSION = 60;
-const PUBLIC = new URL('../public/', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+const MAX_COMMANDS_PER_SESSION = 60;     // operator + crash requests
+const MAX_BUFFERED = 1 << 20;             // a slow SSE client past 1 MB of unsent data is cut off
+const RETENTION_DAYS = Number(process.env.KEEL_RETENTION_DAYS ?? 7);
+/** How many trusted reverse proxies append to X-Forwarded-For in front of us (0 = trust no header). */
+export const TRUSTED_HOPS = Number(process.env.KEEL_TRUSTED_PROXY_HOPS ?? 0);
+const PUBLIC = fileURLToPath(new URL('../public/', import.meta.url));
 
 /** Which observations a visitor may inject. The server signs as the named source; the browser never holds a key. */
 const injectable: Record<string, { source: string; fact: string; values: Json[] }[]> = {
@@ -61,45 +67,81 @@ export function stepView(s: RunState) {
   });
 }
 
-export function runView(hub: Hub, runId: string) {
+export async function runView(hub: Hub, runId: string) {
   const s = hub.state(runId)!;
   return {
     runId, policy: s.policy, policyLabel: policies[s.policy].label, status: s.status, pause: s.pause, tick: s.tick,
     plan: { version: s.plan.version, steps: stepView(s) }, history: s.plans.map((p) => ({ version: p.version, steps: p.steps.map((x) => ({ id: x.id, sig: stepSig(x) })) })),
     revisions: s.revisions, budget: s.budget, goal: s.goal,
     facts: s.world.facts, unstable: s.world.unstable, worldRev: s.world.rev,
-    metrics: runMetrics(hub.store, hub.sim, runId),
+    metrics: await runMetrics(hub.store, hub.sim, runId),
   };
 }
 
-export function startServer(port = Number(process.env.PORT ?? 3000), dbPath = process.env.KEEL_DB ?? ':memory:') {
-  const hub = new Hub(dbPath);
-  const streams = new Map<string, Set<ServerResponse>>();
+/**
+ * Rate-limit key. A client can put anything in X-Forwarded-For, and some proxies append to (rather than replace)
+ * the client's value, so the leftmost entry is never trusted. With N trusted proxy hops, the Nth entry from the
+ * right is the address the outermost trusted proxy saw. With 0 hops, only the socket address is used.
+ * Identity is best-effort either way; global caps bound what any number of spoofed identities can do.
+ */
+export function clientKey(req: Pick<IncomingMessage, 'headers' | 'socket'>, hops = TRUSTED_HOPS): string {
+  const chain = String(req.headers['x-forwarded-for'] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (hops > 0 && chain.length >= hops) return chain[chain.length - hops];
+  return req.socket.remoteAddress ?? '?';
+}
+
+export async function startServer(port = Number(process.env.PORT ?? 3000), target?: string) {
+  const hub = await Hub.open(target);
+  const streams = new Map<string, Set<Conn>>();
   const created: { at: number; ip: string }[] = [];
   const injections = new Map<string, number>();
-  // Behind Render's proxy every socket comes from the proxy; the first forwarded address is the client (spoofable, so a global cap backs it).
-  const clientOf = (req: IncomingMessage) => String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() || req.socket.remoteAddress || '?';
+  const commands = new Map<string, number>();
+  let lastPrune = 0;
+  const prune = async () => {
+    if (Date.now() - lastPrune < 10 * 60_000) return;
+    lastPrune = Date.now();
+    const n = await hub.store.prune(Date.now() - RETENTION_DAYS * 86_400_000);
+    if (n) console.log(`pruned ${n} demo sessions older than ${RETENTION_DAYS} days`);
+  };
 
-  hub.listeners.add((rows: Row[]) => {
-    const session = rows[0] && hub.store.runs().find((r) => r.runId === rows[0].runId)?.session;
-    if (!session) return;
-    const subs = streams.get(session);
-    if (!subs?.size) return;
-    const msg = frame(hub, rows[0].runId, rows);
-    for (const res of subs) res.write(msg);
-  });
+  /** A session from memory, or reloaded from the store (e.g. after a restart) and resumed if still in progress. */
+  const loading = new Map<string, Promise<Session | null>>();
+  const getSession = (id: string): Promise<Session | null> => {
+    const live = hub.sessions.get(id);
+    if (live) return Promise.resolve(live);
+    let p = loading.get(id);
+    if (!p) {
+      p = (async () => {
+        if (!(await hub.store.runs(id)).length) return null;
+        if (hub.sessions.size >= MAX_SESSIONS) evictOldest(hub, streams);
+        const s = await Session.resume(hub, id);
+        if (!s.runIds.every((r) => s.settled(r))) s.play(TICK_MS);
+        return s;
+      })().finally(() => loading.delete(id));
+      loading.set(id, p);
+    }
+    return p;
+  };
 
-  hub.tickListeners.add((s) => {
-    const subs = streams.get(s.id);
+  // Resume recent in-progress sessions after a restart: their logs, receipts, clocks and commitments are in the store.
+  await prune();
+  for (const id of (await hub.store.recentSessions(Date.now() - 30 * 60_000)).slice(0, MAX_SESSIONS)) {
+    try { await getSession(id); } catch (e) { console.error(`resume ${id} failed:`, (e as Error).message); }
+  }
+
+  const broadcast = (sessionId: string, runId: string, rows: Row[]) => {
+    const subs = streams.get(sessionId);
     if (!subs?.size) return;
-    for (const r of s.runIds) { const msg = frame(hub, r, []); for (const res of subs) res.write(msg); }
-  });
+    void payload(hub, runId).then((data) => { for (const c of subs) send(c, runId, rows, data); }).catch((e) => console.error('frame failed:', e));
+  };
+  hub.listeners.add((rows: Row[]) => { if (rows[0]) broadcast(hub.sim.sessionFor(rows[0].runId), rows[0].runId, rows); });
+  hub.tickListeners.add((s) => { for (const r of s.runIds) broadcast(s.id, r, []); });
 
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://x');
       const p = url.pathname;
-      if (p === '/api/health') return json(res, 200, { ok: true, sessions: hub.sessions.size });
+      if (p === '/api/health') return json(res, 200, { ok: true, store: hub.store.kind, sessions: hub.sessions.size });
       if (p === '/api/scenarios' && req.method === 'GET') {
         return json(res, 200, Object.values(scenarios).filter((s) => injectable[s.id]).map((s) => ({
           id: s.id, title: s.title, blurb: s.blurb, goal: s.goal.statement, domain: s.domain.name,
@@ -112,61 +154,73 @@ export function startServer(port = Number(process.env.PORT ?? 3000), dbPath = pr
         const scenario = String(body.scenario ?? 'delivery');
         if (!injectable[scenario]) return json(res, 400, { error: 'unknown scenario' });
         const pols = (Array.isArray(body.policies) ? body.policies : scenario === 'flapping' ? ['naive', 'keel'] : ['static', 'keel']).map(String) as PolicyName[];
-        if (!pols.length || pols.length > 3 || pols.some((x) => !policies[x])) return json(res, 400, { error: 'bad policies' });
-        const ip = clientOf(req);
-        const now = Date.now();
-        while (created.length && now - created[0].at > 60_000) created.shift();
+        if (!pols.length || pols.length > 3 || pols.some((x) => !Object.hasOwn(policies, x))) return json(res, 400, { error: 'bad policies' });
+        const ip = clientKey(req);
+        const t = Date.now();
+        while (created.length && t - created[0].at > 60_000) created.shift();
         if (created.filter((c) => c.ip === ip).length >= 12 || created.length >= 120) return json(res, 429, { error: 'too many new runs; wait a minute' });
-        if (hub.sessions.size >= MAX_SESSIONS) evictOldest(hub);
-        created.push({ at: now, ip });
-        const s = new Session(hub, randomUUID().slice(0, 8), scenario, pols).start();
+        created.push({ at: t, ip });
+        if (hub.sessions.size >= MAX_SESSIONS) evictOldest(hub, streams);
+        void prune().catch((e) => console.error('prune failed:', e));
+        const s = await Session.create(hub, randomUUID().slice(0, 8), scenario, pols);
         s.play(TICK_MS);
         return json(res, 201, { sessionId: s.id, runIds: s.runIds, scenario, tickMs: TICK_MS });
       }
-      const m = /^\/api\/sessions\/([\w-]+)(?:\/(stream|inject|operator|crash|export))?$/.exec(p);
+      const m = /^\/api\/sessions\/([\w-]{1,40})(?:\/(stream|inject|operator|crash|export))?$/.exec(p);
       if (m) {
-        const s = hub.sessions.get(m[1]);
-        if (!s) return json(res, 404, { error: 'no such session (sessions are in memory; the demo host may have restarted)' });
+        const s = await getSession(m[1]);
+        if (!s) return json(res, 404, { error: 'no such run' });
         const action = m[2];
-        if (!action && req.method === 'GET') return json(res, 200, { sessionId: s.id, scenario: s.scenario, tick: s.tick, runs: s.runIds.map((r) => runView(hub, r)) });
+        if (!action && req.method === 'GET') return json(res, 200, { sessionId: s.id, scenario: s.scenario, tick: s.tick, store: hub.store.kind, runs: await Promise.all(s.runIds.map((r) => runView(hub, r))) });
         if (action === 'stream') {
           const total = [...streams.values()].reduce((n, x) => n + x.size, 0);
           if ((streams.get(s.id)?.size ?? 0) >= MAX_STREAMS_PER_SESSION || total >= MAX_STREAMS) return json(res, 429, { error: 'too many open streams' });
-          return stream(req, res, hub, s, streams);
+          return await stream(req, res, hub, s, streams);
         }
-        if (action === 'export') return json(res, 200, { sessionId: s.id, runs: s.runIds.map((r) => ({ runId: r, events: hub.store.rows(r), effects: hub.sim.effects(r) })) });
+        if (action === 'export') {
+          return json(res, 200, {
+            sessionId: s.id, store: hub.store.kind, worldClock: await hub.store.clock(s.id), injections: hub.sim.injections(s.id),
+            runs: await Promise.all(s.runIds.map(async (r) => ({ runId: r, events: await hub.store.rows(r), effects: hub.sim.effectRows(r) }))),
+          });
+        }
         if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
         const body = await readJson(req);
         if (action === 'inject') {
           const used = injections.get(s.id) ?? 0;
           if (used >= MAX_INJECTIONS_PER_SESSION) return json(res, 429, { error: 'injection limit for this run reached; start a new run' });
-          injections.set(s.id, used + 1);
           const allowed = injectable[s.scenario].find((x) => x.fact === body.fact && x.values.includes(body.value as Json));
           if (!allowed) return json(res, 400, { error: 'that observation is not injectable here' });
+          injections.set(s.id, used + 1);
           const src = scenarios[s.scenario].sources[allowed.source];
-          const seqs = s.runIds.map((r) => hub.state(r)!.world.lastSeq[`${src.id}|${allowed.fact}`] ?? 0);
+          const seqs = s.runIds.map((r) => hub.state(r)?.world.lastSeq[`${src.id}|${allowed.fact}`] ?? 0);
           const o = { eventId: `inj-${randomUUID().slice(0, 8)}`, source: src.id, seq: Math.max(...seqs, 1000 + s.tick) + 1, fact: allowed.fact, value: body.value as Json, observedAt: s.tick };
           const obs = { ...o, sig: body.forged ? sign(o, 'visitor-forgery') : sign(o, src.key) };
-          // A genuine injection changes SIMULATED reality for every run, and the source reports it. A forgery changes nothing real.
-          if (!body.forged) hub.store.addWorldChange(s.id, s.tick, allowed.fact, body.value);
-          s.injectAll(obs);
+          // Persisted before delivery: a genuine injection changes SIMULATED reality for every lane; a forgery changes nothing real.
+          await s.injectShared({ tick: s.tick, fact: allowed.fact, value: body.value as Json, real: !body.forged, obs });
           return json(res, 202, { eventId: obs.eventId, forged: !!body.forged });
         }
         const runId = String(body.runId ?? '');
         if (!s.runIds.includes(runId)) return json(res, 400, { error: 'unknown run' });
+        const usedCmd = commands.get(s.id) ?? 0;
+        if (usedCmd >= MAX_COMMANDS_PER_SESSION) return json(res, 429, { error: 'command limit for this run reached; start a new run' });
+        commands.set(s.id, usedCmd + 1);
         if (action === 'operator') {
           const cmd = String(body.cmd);
           if (!['resume', 'abort', 'confirm'].includes(cmd)) return json(res, 400, { error: 'bad command' });
-          if (cmd === 'confirm' && !(hub.state(runId)!.world.unstable.includes(String(body.fact)))) return json(res, 400, { error: 'only an unstable fact can be confirmed' });
-          hub.submit(runId, { t: 'operator', cmd: cmd as 'resume', fact: body.fact as string | undefined, value: body.value as Json, at: s.tick }, s);
+          const st = hub.state(runId);
+          if (cmd === 'confirm' && !(st?.world.unstable.includes(String(body.fact)))) return json(res, 400, { error: 'only an unstable fact can be confirmed' });
+          // A confirmation adopts the latest reported value; the browser cannot choose an arbitrary one.
+          await hub.submit(runId, { t: 'operator', cmd: cmd as 'resume', fact: cmd === 'confirm' ? String(body.fact) : undefined, value: cmd === 'confirm' ? st!.world.facts[String(body.fact)] : undefined, at: s.tick }, s);
           return json(res, 202, { ok: true });
         }
-        if (action === 'crash') { hub.crashAndRecover(runId, s); return json(res, 202, { ok: true }); }
+        if (action === 'crash') { await hub.crashAndRecover(runId, s); return json(res, 202, { ok: true }); }
       }
       if (req.method === 'GET') return serveStatic(res, p);
       json(res, 404, { error: 'not found' });
     } catch (e) {
-      if (e instanceof SyntaxError || (e as Error).message === 'body too large') return json(res, 400, { error: 'bad request body' });
+      if (res.headersSent) { res.destroy(); return; } // e.g. an SSE stream already started: never write headers twice
+      if ((e as Error).message === 'body too large') return json(res, 413, { error: 'request body too large' });
+      if (e instanceof SyntaxError) return json(res, 400, { error: 'malformed JSON' });
       console.error(e);
       json(res, 500, { error: 'internal error' });
     }
@@ -175,32 +229,52 @@ export function startServer(port = Number(process.env.PORT ?? 3000), dbPath = pr
   return { server, hub };
 }
 
-function frame(hub: Hub, runId: string, rows: Row[]) {
-  const s = hub.sessions.get(hub.store.runs().find((r) => r.runId === runId)!.session)!;
-  const cursor = s.runIds.map((r) => `${r}=${hub.store.head(r)}`).join('&');
-  return `id: ${cursor}\ndata: ${JSON.stringify({ runId, rows, view: runView(hub, runId), tick: s.tick })}\n\n`;
+/** One SSE connection. Its cursor advances only for the lane whose rows it has actually been sent. */
+type View = { view: Awaited<ReturnType<typeof runView>>; tick: number };
+type Conn = { res: ServerResponse; cursor: Map<string, number>; ready: boolean; backlog: { runId: string; rows: Row[]; data: View }[]; ping: NodeJS.Timeout };
+
+async function payload(hub: Hub, runId: string): Promise<View> {
+  const s = hub.sessions.get(hub.sim.sessionFor(runId));
+  return { view: await runView(hub, runId), tick: s?.tick ?? 0 };
 }
 
-function stream(req: IncomingMessage, res: ServerResponse, hub: Hub, s: Session, streams: Map<string, Set<ServerResponse>>) {
+function send(c: Conn, runId: string, rows: Row[], data: View) {
+  if (!c.ready) { c.backlog.push({ runId, rows, data }); return; }
+  const fresh = rows.filter((r) => r.n > (c.cursor.get(runId) ?? 0));
+  if (rows.length && !fresh.length) return; // already delivered during catch-up
+  if (fresh.length) c.cursor.set(runId, fresh.at(-1)!.n);
+  const id = [...c.cursor].map(([r, n]) => `${r}=${n}`).join('&');
+  c.res.write(`id: ${id}\ndata: ${JSON.stringify({ runId, rows: fresh, ...data })}\n\n`);
+  if (c.res.writableLength > MAX_BUFFERED) c.res.destroy(); // slow client: drop it; it can reconnect with its cursor
+}
+
+async function stream(req: IncomingMessage, res: ServerResponse, hub: Hub, s: Session, streams: Map<string, Set<Conn>>) {
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no' });
   const last = new URLSearchParams(String(req.headers['last-event-id'] ?? ''));
-  for (const r of s.runIds) {
-    const rows = hub.store.rows(r, Number(last.get(r) ?? 0));
-    if (rows.length) res.write(frame(hub, r, rows));
-    else res.write(`data: ${JSON.stringify({ runId: r, rows: [], view: runView(hub, r), tick: s.tick })}\n\n`);
-  }
+  const c: Conn = {
+    res, ready: false, backlog: [],
+    cursor: new Map(s.runIds.map((r) => [r, Math.max(0, Math.floor(Number(last.get(r))) || 0)])),
+    ping: setInterval(() => res.write(': keepalive\n\n'), 20_000), // transport keepalive only; the agent never sees it
+  };
   const set = streams.get(s.id) ?? new Set();
-  set.add(res);
+  set.add(c); // subscribe first, buffer live frames until the catch-up is written
   streams.set(s.id, set);
-  const ping = setInterval(() => res.write(': keepalive\n\n'), 20_000); // transport keepalive only; the agent never sees it
-  req.on('close', () => { clearInterval(ping); set.delete(res); });
+  req.on('close', () => { clearInterval(c.ping); set.delete(c); });
+  try {
+    const catchup = await Promise.all(s.runIds.map(async (r) => ({ r, rows: await hub.store.rows(r, c.cursor.get(r) ?? 0) })));
+    c.ready = true;
+    for (const { r, rows } of catchup) send(c, r, rows, await payload(hub, r));
+    for (const b of c.backlog.splice(0)) send(c, b.runId, b.rows, b.data);
+  } catch (e) { console.error('stream failed:', e); res.destroy(); }
 }
 
-function evictOldest(hub: Hub) {
+function evictOldest(hub: Hub, streams: Map<string, Set<Conn>>) {
   const [id, s] = hub.sessions.entries().next().value!;
   s.close();
   hub.sessions.delete(id);
-  for (const r of s.runIds) hub.states.delete(r);
+  for (const r of s.runIds) { hub.states.delete(r); hub.sim.forget(r); }
+  for (const c of streams.get(id) ?? []) { clearInterval(c.ping); c.res.end(); }
+  streams.delete(id); // the run stays in the store and can be reopened by id
 }
 
 function json(res: ServerResponse, code: number, body: unknown) {

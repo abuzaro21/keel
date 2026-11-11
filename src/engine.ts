@@ -6,9 +6,7 @@
 // Nothing here reads a clock: the engine only ever wakes because an input arrived.
 import { createHash } from 'node:crypto';
 import { activeObligations, condText, contract, editOps, entityOf, evalCond, impact, project, referencedFacts, stepSig } from './model.ts';
-import * as modelCore from './model.ts';
-import * as worldCore from './world.ts';
-import * as repairCore from './repair.ts';
+import { readFileSync } from 'node:fs';
 import type { Ctx, Facts, Goal, Json, Params, Plan, Step } from './model.ts';
 import { validate } from './repair.ts';
 import type { Candidate, Check } from './repair.ts';
@@ -73,6 +71,7 @@ export type Ev =
   | { t: 'paused'; kind: PauseKind; reason: string }
   | { t: 'resumed'; by: string }
   | { t: 'violation'; key: string; text: string; at: number }
+  | { t: 'monitoring'; detail: string }
   | { t: 'completed'; beliefGoalMet: boolean; detail: string }
   | { t: 'stopped'; reason: string };
 
@@ -94,6 +93,8 @@ export type RunState = {
   /** Commitments the agent KNOWS were broken while live (e.g. served traffic from a degraded region). Never erased. */
   violations: { key: string; text: string; at: number }[];
   abandoned: { sig: string; doneCount: number }[];
+  /** Every step has run, but live commitments (e.g. a truck in transit) are still being watched. */
+  monitoring: boolean;
   revisions: number; budget: number | null; proposals: number; tick: number; seq: number;
 };
 
@@ -103,7 +104,7 @@ const keyOf = (s: RunState, x: Pick<Step, 'action' | 'params'>) => contract(sc(s
 export const remainingOf = (s: RunState) => s.plan.steps.filter((x) => !s.done.includes(keyOf(s, x)));
 export const ctxOf = (s: RunState): Ctx => {
   const done = new Set(s.done);
-  return { f: s.world.facts, done, unstable: unstableOf(s), active: activeObligations(sc(s).domain, s.plan.steps, done) };
+  return { f: s.world.facts, done, unstable: unstableOf(s), active: activeObligations(sc(s).domain, s.plan.steps, done, s.world.facts) };
 };
 const tailSig = (steps: Pick<Step, 'action' | 'params'>[]) => steps.map(stepSig).join(' > ');
 /** Semantic operation id = hash(run, effect). Each preparation of it gets a new generation. */
@@ -112,26 +113,30 @@ export const opIdFor = (runId: string, effectKey: string) => createHash('sha256'
  * Version of everything that decides: action contracts + sources (scenarios.ts) and the core rule modules.
  * Replay refuses a run recorded under different semantics (e.g. a changed timestamp window).
  */
+// Build manifest of every module that participates in a decision (read once at load).
+const CORE_SOURCE = ['model.ts', 'world.ts', 'repair.ts', 'engine.ts', 'scenarios.ts']
+  .map((f) => readFileSync(new URL(`./${f}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')).join('\n');
 export function contractHash(S: Scenario): string {
-  const src = (m: object) => Object.entries(m).map(([k, v]) => `${k}=${typeof v === 'function' ? v.toString() : JSON.stringify(v)}`).join('\n');
-  return createHash('sha256').update([actionsHash(S), JSON.stringify(S.enums), src(modelCore), src(worldCore), src(repairCore), reduce.toString(), decide.toString()].join('\n')).digest('hex').slice(0, 16);
+  return createHash('sha256').update([actionsHash(S), JSON.stringify(S.enums), CORE_SOURCE].join('\n')).digest('hex').slice(0, 16);
 }
 
 export function startContext(scenario: string, policy: PolicyName): RunContext {
+  if (!Object.hasOwn(scenarios, scenario) || !Object.hasOwn(policies, policy)) throw new Error(`unknown scenario/policy ${scenario}/${policy}`);
   const S = scenarios[scenario];
   return { facts: S.facts, plan: S.plan, goal: S.goal, policy: policies[policy], contractHash: contractHash(S) };
 }
 
 export function reduce(s: RunState | null, e: Ev): RunState {
   if (e.t === 'start') {
-    const S = scenarios[e.scenario];
+    const S = Object.hasOwn(scenarios, e.scenario) ? scenarios[e.scenario] : undefined;
     if (!S) throw new Error(`unknown scenario ${e.scenario}`);
+    if (!Object.hasOwn(policies, e.context.policy.name)) throw new Error(`unknown policy ${e.context.policy.name}`);
     if (contractHash(S) !== e.context.contractHash) throw new Error(`run ${e.runId} was recorded under contracts ${e.context.contractHash}; this build has ${contractHash(S)}`);
     const plan = { version: 1, steps: e.context.plan };
     return {
       runId: e.runId, scenario: e.scenario, policy: e.context.policy.name, cfg: e.context.policy, goal: e.context.goal,
       status: 'running', pause: null, world: initialWorld(e.context.facts), plan, plans: [plan], ledger: {}, done: [], inflight: null,
-      pending: null, awaiting: null, lastContradiction: null, sinceRevision: [], violations: [], abandoned: [],
+      pending: null, awaiting: null, lastContradiction: null, sinceRevision: [], violations: [], abandoned: [], monitoring: false,
       revisions: 0, budget: e.context.policy.budget, proposals: 0, tick: e.at, seq: 1,
     };
   }
@@ -196,7 +201,8 @@ export function reduce(s: RunState | null, e: Ev): RunState {
       if (s.pause?.kind === 'budget' && s.proposals >= s.cfg.planBudget) n.proposals = s.cfg.planBudget - 1;
       if (s.pause?.kind === 'oscillation') n.abandoned = [];                                                  // operator accepts returning to an earlier plan
       return n;
-    case 'completed': n.status = 'completed'; return n;
+    case 'monitoring': n.monitoring = true; return n;
+    case 'completed': n.status = 'completed'; n.monitoring = false; return n;
     case 'stopped': n.status = 'stopped'; n.pending = null; return n;
     default: return n;
   }
@@ -293,6 +299,12 @@ export function decide(state: RunState | null, input: Ev): Ev[] {
     if (s.status !== 'running' || s.inflight || s.pending) return;
     const next = remainingOf(s)[0];
     if (!next) {
+      // Commands done is not the same as commitments done: watch live obligations until they end.
+      const live = P.detect ? ctxOf(s).active : [];
+      if (live.length) {
+        if (!s.monitoring) emit({ t: 'monitoring', detail: `every step has run; watching ${live.map((o) => `${o.from}: ${condText(o.cond)}`).join('; ')} until ${live.map((o) => (o.until ? condText(o.until) : 'released')).join('; ')}` });
+        return;
+      }
       const met = G.success.every((c) => evalCond(c, s.world.facts) === 'true');
       const v = s.violations;
       emit({ t: 'completed', beliefGoalMet: met && !v.length, detail: !met ? 'plan finished, but the agent does not believe every goal condition holds'

@@ -26,6 +26,11 @@ export type Scenario = {
   outcome(truthAt: (tick: number) => Facts, effects: SimEffect[], endTick: number): { met: boolean; detail: string; pending?: boolean };
   /** World time by which the outcome of the applied effects is decided (e.g. the truck's arrival). */
   settle?(truthAt: (tick: number) => Facts, effects: SimEffect[]): number;
+  /**
+   * Reports the SIMULATED world sends back about an applied effect (e.g. the carrier's arrival report).
+   * `value` is computed when the report is delivered, from truth up to that moment — never from the future.
+   */
+  reports?(e: SimEffect, truthAt: (tick: number) => Facts): { tick: number; source: string; fact: string; value: (truthAt: (tick: number) => Facts) => Json }[];
 };
 
 const PERMIT_OK = ['none', 'granted'];
@@ -94,13 +99,17 @@ const logistics: Domain = {
         { fact: `route:${p.route}.etaMin`, op: 'lte', ref: `order:${p.order}.coldHoldMin` },
       ],
       maintains: (p) => [{ fact: `route:${p.route}.status`, op: 'eq', value: 'open' }],
+      maintainsUntil: (p) => ({ fact: `order:${p.order}.delivery`, op: 'neq', value: 'pending' }),
       produces: (p, f) => ({ [`order:${p.order}.dispatchedVia`]: p.route, [`order:${p.order}.etaMin`]: f[`route:${p.route}.etaMin`] ?? null, [`truck:${p.truck}.status`]: 'en-route' }),
       effectKey: (p) => `dispatch:${p.order}`,
     },
     notify: {
       type: 'notify', describe: 'Tell the customer the delivery is on its way and on time. Cannot be unsent.', params: { order: 'order' },
       commitment: 'irreversible', duration: 1, cost: () => 0,
-      requires: (p) => [{ fact: `order:${p.order}.dispatchedVia`, op: 'neq', value: 'none' }],
+      requires: (p) => [
+        { fact: `order:${p.order}.dispatchedVia`, op: 'neq', value: 'none' },
+        { fact: `order:${p.order}.delivery`, op: 'in', value: ['pending', 'delivered'] }, // never promise "on time" for a stuck truck
+      ],
       produces: (p) => ({ [`order:${p.order}.customerNotified`]: true }),
       effectKey: (p) => `notify:${p.order}`,
     },
@@ -110,7 +119,7 @@ const logistics: Domain = {
 const logisticsFacts: Facts = {
   'order:1042.stock': 'available', 'order:1042.picked': false, 'order:1042.packed': false,
   'order:1042.loadedOn': 'none', 'order:1042.labelRoute': 'none', 'order:1042.dispatchedVia': 'none', 'order:1042.customerNotified': false,
-  'order:1042.etaMin': 0, 'order:1042.slaMin': 70, 'order:1042.coldHoldMin': 90,
+  'order:1042.etaMin': 0, 'order:1042.slaMin': 70, 'order:1042.coldHoldMin': 90, 'order:1042.delivery': 'pending',
   'truck:T1.status': 'available', 'permit-office:main.status': 'open', 'weather:depot.tempC': 24,
   'route:R1.status': 'open', 'route:R1.etaMin': 40, 'route:R1.permit': 'none',
   'route:R2.status': 'open', 'route:R2.etaMin': 55, 'route:R2.permit': 'required',
@@ -165,7 +174,21 @@ function logisticsOutcome(truthAt: (tick: number) => Facts, effects: SimEffect[]
   return { met: true, detail: `order #1042 delivered via ${route} in ${eta} min (SLA 70, cold-hold 90)` };
 }
 
-const logisticsEnums: Enums = { 'route:*.status': ['open', 'closed'], 'route:*.permit': ['none', 'required', 'granted', 'revoked'] };
+const logisticsEnums: Enums = { 'route:*.status': ['open', 'closed'], 'route:*.permit': ['none', 'required', 'granted', 'revoked'], 'order:*.delivery': ['pending', 'delivered', 'stuck'] };
+/** The carrier reports what actually happened to the truck: at arrival time, or right away if it never got moving. */
+const logisticsReports: NonNullable<Scenario['reports']> = (e, truthAt) => {
+  if (e.action !== 'dispatch') return [];
+  const order = String(e.params.order), route = String(e.params.route);
+  const due = e.harm ? e.tick + 1 : arrival(truthAt, e);
+  return [{
+    tick: due, source: 'carrier', fact: `order:${order}.delivery`,
+    value: (at) => {
+      if (e.harm) return 'stuck';
+      for (let t = e.tick; t <= due; t++) if (at(t)[`route:${route}.status`] !== 'open') return 'stuck';
+      return 'delivered';
+    },
+  }];
+};
 const logisticsSettle = (truthAt: (tick: number) => Facts, effects: SimEffect[]) => {
   const d = effects.find((e) => e.action === 'dispatch' && !e.harm);
   return d ? arrival(truthAt, d) : 0;
@@ -176,6 +199,7 @@ const logisticsSources: Record<string, Source> = {
   'traffic-authority': { id: 'traffic-authority', key: 'sim-key-traffic-authority', mayAssert: ['route:*.status', 'route:*.permit'], rank: 2 },
   'road-sensor-7': { id: 'road-sensor-7', key: 'sim-key-road-sensor-7', mayAssert: ['route:*.status'], rank: 1 },
   'weather-feed': { id: 'weather-feed', key: 'sim-key-weather', mayAssert: ['weather:*.tempC'], rank: 1 },
+  carrier: { id: 'carrier', key: 'sim-key-carrier', mayAssert: ['order:*.delivery'], rank: 2 },
 };
 
 // ---------------------------------------------------------------- service recovery
@@ -291,7 +315,7 @@ export const scenarios: Record<string, Scenario> = {
     id: 'delivery', title: 'Cold-chain delivery: a road closes after packing',
     blurb: 'Order #1042 is picked and sealed in its cold box. While it is being loaded, the traffic authority closes route R1.',
     domain: logistics, goal: logisticsGoal, facts: logisticsFacts, plan: logisticsPlan,
-    sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome, enums: logisticsEnums, settle: logisticsSettle,
+    sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome, enums: logisticsEnums, settle: logisticsSettle, reports: logisticsReports,
     truth: [{ tick: 6, fact: 'route:R1.status', value: 'closed' }],
     feed: [
       { tick: 3, source: 'weather-feed', fact: 'weather:depot.tempC', value: 31 },
@@ -324,7 +348,7 @@ export const scenarios: Record<string, Scenario> = {
     id: 'flapping', title: 'Adaptation failure: a faulty sensor flaps both routes',
     blurb: 'road-sensor-7 flips R1 and R2 between open and closed; a forged closure arrives from an unregistered source. Only the traffic authority is right.',
     domain: logistics, goal: logisticsGoal, facts: logisticsFacts, plan: logisticsPlan,
-    sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome, enums: logisticsEnums, settle: logisticsSettle,
+    sources: logisticsSources, physics: logisticsPhysics, outcome: logisticsOutcome, enums: logisticsEnums, settle: logisticsSettle, reports: logisticsReports,
     truth: [{ tick: 2, fact: 'route:R1.status', value: 'closed' }],
     feed: [
       { tick: 2, source: 'road-sensor-7', fact: 'route:R1.status', value: 'closed' },

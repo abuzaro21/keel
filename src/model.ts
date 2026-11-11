@@ -22,6 +22,8 @@ export type ActionContract = {
   maintains?(p: Params): Cond[];
   /** Action types whose maintained obligations this step ends (e.g. a new traffic shift ends the old one's). */
   releases?: string[];
+  /** The obligations also end once this condition holds (e.g. the carrier reports the truck arrived). */
+  maintainsUntil?(p: Params): Cond;
   /** Facts the agent expects to hold after the step succeeds. Keys must not depend on `f`. */
   produces(p: Params, f: Facts): Facts;
   /** Identity of the external side effect. Same key = same effect, whatever the plan version. */
@@ -37,8 +39,8 @@ export type Domain = {
 export type Goal = { statement: string; success: Cond[] };
 export type Step = { id: string; action: string; params: Params };
 export type Plan = { version: number; steps: Step[] };
-/** A live commitment created by a completed step. */
-export type Obligation = { cond: Cond; action: string; from: string };
+/** A live commitment created by a completed step. Ends when released by a later step or when `until` holds. */
+export type Obligation = { cond: Cond; action: string; from: string; until?: Cond };
 
 /** Three-valued: a condition over a fact we no longer trust, or with a missing/invalid operand, is UNKNOWN. */
 export type Truth = 'true' | 'false' | 'unknown';
@@ -67,16 +69,20 @@ export function contract(d: Domain, action: string): ActionContract {
   return d.actions[action];
 }
 
-/** Obligations created by completed steps (in plan order) and not yet released by a later completed step. */
-export function activeObligations(d: Domain, steps: Step[], done: ReadonlySet<string>): Obligation[] {
+const obligationsOf = (a: ActionContract, s: Pick<Step, 'action' | 'params'>): Obligation[] =>
+  (a.maintains?.(s.params) ?? []).map((cond) => ({ cond, action: a.type, from: stepSig(s), until: a.maintainsUntil?.(s.params) }));
+const ended = (o: Obligation, f: Facts) => !!o.until && evalCond(o.until, f) === 'true';
+
+/** Obligations created by completed steps (in plan order), not yet released by a later completed step nor ended by `until`. */
+export function activeObligations(d: Domain, steps: Step[], done: ReadonlySet<string>, f: Facts = {}): Obligation[] {
   let ob: Obligation[] = [];
   for (const s of steps) {
     const a = contract(d, s.action);
     if (!done.has(a.effectKey(s.params))) continue;
     ob = ob.filter((o) => !a.releases?.includes(o.action));
-    for (const cond of a.maintains?.(s.params) ?? []) ob.push({ cond, action: a.type, from: stepSig(s) });
+    ob.push(...obligationsOf(a, s));
   }
-  return ob;
+  return ob.filter((o) => !ended(o, f));
 }
 
 export type Ctx = { f: Facts; done: ReadonlySet<string>; unstable: ReadonlySet<string>; active: Obligation[] };
@@ -113,9 +119,9 @@ export function project(d: Domain, goal: Goal, steps: Step[], c: Ctx): Projectio
     cost += a.cost(s.params, end);
     Object.assign(end, a.produces(s.params, end));
     for (const o of kept) if (heldBefore.get(o) && !holds(o)) fail(s, index, o);
-    const created = (a.maintains?.(s.params) ?? []).map((cond) => ({ cond, action: a.type, from: stepSig(s) }));
+    const created = obligationsOf(a, s);
     for (const o of created) if (!holds(o) && !failures.some((f) => f.index === index && condText(f.cond) === condText(o.cond))) fail(s, index, o);
-    ob = [...kept, ...created];
+    ob = [...kept, ...created].filter((o) => !ended(o, end));
   });
   const goalFailures = [...goal.success.filter((g) => evalCond(g, end, c.unstable) !== 'true'), ...ob.filter((o) => !holds(o)).map((o) => o.cond)];
   return { ok: failures.length === 0 && goalFailures.length === 0, failures, goalFailures, end, cost };
