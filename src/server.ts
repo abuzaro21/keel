@@ -25,6 +25,8 @@ const MAX_BUFFERED = 1 << 20;             // a slow SSE client past 1 MB of unse
 const RETENTION_DAYS = Number(process.env.KEEL_RETENTION_DAYS ?? 7);
 /** How many trusted reverse proxies append to X-Forwarded-For in front of us (0 = trust no header). */
 export const TRUSTED_HOPS = Number(process.env.KEEL_TRUSTED_PROXY_HOPS ?? 0);
+/** Optional single-value header set by a trusted edge proxy (lower-case name). Empty = not used. */
+export const CLIENT_IP_HEADER = (process.env.KEEL_CLIENT_IP_HEADER ?? '').toLowerCase();
 const PUBLIC = fileURLToPath(new URL('../public/', import.meta.url));
 
 /** Which observations a visitor may inject. The server signs as the named source; the browser never holds a key. */
@@ -84,7 +86,13 @@ export async function runView(hub: Hub, runId: string) {
  * right is the address the outermost trusted proxy saw. With 0 hops, only the socket address is used.
  * Identity is best-effort either way; global caps bound what any number of spoofed identities can do.
  */
-export function clientKey(req: Pick<IncomingMessage, 'headers' | 'socket'>, hops = TRUSTED_HOPS): string {
+export function clientKey(req: Pick<IncomingMessage, 'headers' | 'socket'>, hops = TRUSTED_HOPS, header = CLIENT_IP_HEADER): string {
+  // Opt-in: a header the edge proxy OVERWRITES on every request (e.g. Cloudflare's cf-connecting-ip in front of Render).
+  // Only set this when every request is known to pass through that proxy; a client-supplied copy is otherwise trivially spoofed.
+  if (header) {
+    const v = req.headers[header];
+    if (typeof v === 'string' && /^[0-9a-fA-F:.]{2,45}$/.test(v.trim())) return v.trim();
+  }
   const chain = String(req.headers['x-forwarded-for'] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
   if (hops > 0 && chain.length >= hops) return chain[chain.length - hops];
   return req.socket.remoteAddress ?? '?';

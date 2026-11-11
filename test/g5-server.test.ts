@@ -64,3 +64,15 @@ test('API: only allow-listed observations are injectable; bad bodies are 400; st
     }
   } finally { server.close(); await hub.close(); }
 });
+
+test('client identity: spoofed X-Forwarded-For entries never become the rate-limit key', async () => {
+  const { clientKey } = await import('../src/server.ts');
+  const req = (xff: string, extra: Record<string, string> = {}) => ({ headers: { 'x-forwarded-for': xff, ...extra }, socket: { remoteAddress: '10.0.0.9' } }) as unknown as Parameters<typeof clientKey>[0];
+  assert.equal(clientKey(req('6.6.6.6'), 0, ''), '10.0.0.9', 'no trusted hops: socket address only');
+  assert.equal(clientKey(req('6.6.6.6, 1.2.3.4'), 1, ''), '1.2.3.4', 'one trusted hop: the entry it appended, not the client-written left one');
+  assert.equal(clientKey(req('7.7.7.7, 6.6.6.6, 1.2.3.4, 172.64.0.1'), 2, ''), '1.2.3.4');
+  assert.equal(clientKey(req('1.2.3.4'), 2, ''), '10.0.0.9', 'chain shorter than the trusted hops: fall back to the socket');
+  assert.equal(clientKey(req('6.6.6.6', { 'cf-connecting-ip': '1.2.3.4' }), 0, 'cf-connecting-ip'), '1.2.3.4', 'an edge-overwritten header, when configured');
+  assert.equal(clientKey(req('6.6.6.6', { 'cf-connecting-ip': 'x<script>' }), 0, 'cf-connecting-ip'), '10.0.0.9', 'malformed values are ignored');
+  assert.equal(clientKey(req('6.6.6.6', { 'cf-connecting-ip': '9.9.9.9' }), 0, ''), '10.0.0.9', 'and never used unless configured');
+});
