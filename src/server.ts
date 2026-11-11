@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { Hub, Session } from './runner.ts';
 import type { Row } from './store.ts';
+import { FencedError } from './store.ts';
 import { scenarios } from './scenarios.ts';
 import { policies } from './engine.ts';
 import type { PolicyName, RunState } from './engine.ts';
@@ -253,6 +254,7 @@ export async function startServer(port = Number(process.env.PORT ?? 3000), targe
       if (res.headersSent) { res.destroy(); return; } // e.g. an SSE stream already started: never write headers twice
       if ((e as Error).message === 'body too large') return json(res, 413, { error: 'request body too large' });
       if (e instanceof SyntaxError) return json(res, 400, { error: 'malformed JSON' });
+      if (e instanceof FencedError) return json(res, 503, { error: 'this instance has been replaced; reload the page' });
       console.error(e);
       json(res, 500, { error: 'internal error' });
     }
