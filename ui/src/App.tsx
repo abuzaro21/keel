@@ -215,6 +215,7 @@ function Lane({ run, tickMs, tick, onOperator, onCrash, busy }: { run: Run; tick
           <div><span className="eyebrow">Simulated world</span><strong>{m.outcomePending ? '… ' : m.goalMet ? '✓ ' : '✗ '}{m.truth}</strong></div>
           {m.violations.length > 0 && <div><span className="eyebrow">Known violation</span><span>{m.violations.join('; ')}</span></div>}
           {completed && m.beliefGoalMet && !m.goalMet && !m.outcomePending && <p className="silent">Silent failure: every step has a receipt, the agent reports success, and the world disagrees.</p>}
+          {completed && m.beliefGoalMet === false && m.invalidActions > 0 && <p className="silent">Too late: every irreversible step ran on the original plan; the agent learned it had failed only afterwards.</p>}
         </div>
       )}
 
