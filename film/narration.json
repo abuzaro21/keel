@@ -1,0 +1,42 @@
+[
+  {
+    "id": "title",
+    "text": "Two agents. Same goal, same plan, same simulated world. Then reality changes."
+  },
+  {
+    "id": "delivery",
+    "text": "At tick six, route R1 closes. KEEL finds the one step that assumed R1 was open, keeps the three finished steps, and repairs only the rest. The repair was a recorded model proposal, validated now."
+  },
+  {
+    "id": "delivery2",
+    "text": "The static agent drives on, and learns too late."
+  },
+  {
+    "id": "scorecard",
+    "text": "Every number here is recomputed from the event log."
+  },
+  {
+    "id": "recovery",
+    "text": "A failover target degrades. KEEL re-checks before shifting traffic, and moves checkout to region C."
+  },
+  {
+    "id": "recovery2",
+    "text": "The static plan sends checkout into the degraded region, and still reports success. KEEL never served an error."
+  },
+  {
+    "id": "flapping",
+    "text": "Now a forged report, and a flapping sensor. The forgery is rejected. When the readings oscillate, KEEL pauses, and asks an operator."
+  },
+  {
+    "id": "flapping2",
+    "text": "One confirmation, and KEEL delivers. The naive agent followed the noise onto a closed road."
+  },
+  {
+    "id": "engine",
+    "text": "Crash the agent mid-step. It rebuilds from its persisted log: finished work kept, no effect applied twice."
+  },
+  {
+    "id": "proof",
+    "text": "Tested on SQLite and Postgres, in the browser, and through a kill-and-takeover. Everything here is simulated. KEEL: the plan can change. The goal stays."
+  }
+]

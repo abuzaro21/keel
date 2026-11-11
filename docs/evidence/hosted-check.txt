@@ -1,0 +1,12 @@
+# scripts/hosted-check.sh at aabcfcd, 2026-11-11T01:14:23Z, image keel:local on postgres:16 (Docker Desktop, Windows)
+sha256:a5d66fb54fce49b951337cb23c74e528bcd6f8db82694af510983a688c8724f9
+before kill: t7 static:running keel:running
+hc1 SIGKILLed
+after resume: keel: completed goalMet=true dupEffects=0 recovered=3 | order #1042 delivered via R2 in 55 min (SLA 70, cold-hold 90)
+               static: completed goalMet=false dupEffects=0 recovered=0 | truck T1 dispatched onto closed route R1: stuck at the closure; the customer was told it was on time
+overlap: old hc2 health=200 (expect 200 until it next writes)
+old hc2 create-session after takeover: HTTP 503 (expect 500/503, never 201)
+old hc2 health now: 503 (expect 503)
+new hc3 health: 200; new session ad36acca1cbd4c8c95ae9533e75e326b created on hc3
+fenced: this process holds owner epoch 2, the database is now owned by epoch 3; stopping every session in this process
+exit 0

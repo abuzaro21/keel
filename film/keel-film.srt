@@ -1,0 +1,119 @@
+1
+00:00:00,400 --> 00:00:01,551
+Two agents.
+
+2
+00:00:01,551 --> 00:00:04,870
+Same goal, same plan, same simulated world.
+
+3
+00:00:04,870 --> 00:00:06,700
+Then reality changes.
+
+4
+00:00:07,300 --> 00:00:09,778
+At tick six, route R1 closes.
+
+5
+00:00:09,778 --> 00:00:13,673
+KEEL finds the one step that assumed R1 was open,
+
+6
+00:00:13,673 --> 00:00:16,293
+keeps the three finished steps,
+
+7
+00:00:16,293 --> 00:00:18,559
+and repairs only the rest.
+
+8
+00:00:18,559 --> 00:00:22,950
+The repair was a recorded model proposal, validated now.
+
+9
+00:00:23,599 --> 00:00:26,999
+The static agent drives on, and learns too late.
+
+10
+00:00:29,066 --> 00:00:32,916
+Every number here is recomputed from the event log.
+
+11
+00:00:33,699 --> 00:00:35,552
+A failover target degrades.
+
+12
+00:00:35,552 --> 00:00:39,874
+KEEL re-checks before shifting traffic, and moves checkout to region C.
+
+13
+00:00:41,866 --> 00:00:45,686
+The static plan sends checkout into the degraded region,
+
+14
+00:00:45,686 --> 00:00:47,658
+and still reports success.
+
+15
+00:00:47,658 --> 00:00:49,691
+KEEL never served an error.
+
+16
+00:00:50,300 --> 00:00:53,387
+Now a forged report, and a flapping sensor.
+
+17
+00:00:53,387 --> 00:00:55,277
+The forgery is rejected.
+
+18
+00:00:55,277 --> 00:00:59,625
+When the readings oscillate, KEEL pauses, and asks an operator.
+
+19
+00:01:02,366 --> 00:01:05,156
+One confirmation, and KEEL delivers.
+
+20
+00:01:05,156 --> 00:01:09,141
+The naive agent followed the noise onto a closed road.
+
+21
+00:01:10,199 --> 00:01:12,156
+Crash the agent mid-step.
+
+22
+00:01:12,156 --> 00:01:14,744
+It rebuilds from its persisted log:
+
+23
+00:01:14,744 --> 00:01:17,899
+finished work kept, no effect applied twice.
+
+24
+00:01:22,133 --> 00:01:24,258
+Tested on SQLite and Postgres,
+
+25
+00:01:24,258 --> 00:01:25,498
+in the browser,
+
+26
+00:01:25,498 --> 00:01:27,742
+and through a kill-and-takeover.
+
+27
+00:01:27,742 --> 00:01:29,808
+Everything here is simulated.
+
+28
+00:01:29,808 --> 00:01:30,458
+KEEL:
+
+29
+00:01:30,458 --> 00:01:31,993
+the plan can change.
+
+30
+00:01:31,993 --> 00:01:33,233
+The goal stays.
