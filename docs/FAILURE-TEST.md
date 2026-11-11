@@ -19,3 +19,15 @@
 The outcome is honest: KEEL is **paused with the goal unfinished** until a human confirms, and then completes via R2. Nothing irreversible ran on an untrusted fact.
 
 **Other failure cases, each with a test** (`test/`): duplicate and out-of-order delivery; forged ids; producer timestamps outside the clock window; a change arriving during a step's preparation (fenced) and during application (reconciled); a world change between repair request and planner answer (stale candidate rejected); a lost acknowledgement (reconciled, no repeat); crash at every point of a run, plus real `SIGKILL` before and after the effect boundary; no feasible repair (pause, goal not weakened); revision-budget exhaustion; a road closing while the truck is already in transit — an irreversible step that cannot be undone, so KEEL stops instead of sending a false "on time" notice.
+
+## Process-level failures (the agent's own infrastructure)
+
+| Failure | What happens | Evidence |
+|---|---|---|
+| `SIGKILL` of the container mid-run (Docker image on Postgres) | A second container resumes the session from the database: KEEL completes via R2, 3 completed steps preserved, 0 duplicate effects; the static lane still ends stuck | `scripts/hosted-check.sh`, [`evidence/hosted-check.txt`](evidence/hosted-check.txt) |
+| Two instances overlap (zero-downtime deploy) | The newer one claims the owner epoch; the older one's next write is refused, it stops its sessions and answers 503 (health and API) | same, plus `test/g8` R1-1/2/3 |
+| A replaced process tries maintenance (prune, restore) | Refused with `FencedError`; the owner's data is untouched | `test/g9` A |
+| A session is evicted from memory while its clock tick or an injection is in flight | Eviction waits for the tick, the injection queue and every mailbox; late requests get 409 and the session reloads cleanly | `test/g9` B |
+| A live-view frame fails to build | That session's streams are closed instead of skipping rows; the reconnect backfills from the store with no gap | `test/g9` C |
+| Concurrent visitor injections and reloads after a restart | Distinct, ordered sequence numbers; store order equals delivery order; parallel reloads all succeed | `test/g8` R1-4/10/11/13 |
+| Database from an older build | Refused with a clear message, never half-migrated | `test/g8` R1-8 |

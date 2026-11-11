@@ -1,0 +1,20 @@
+# Render Blueprint for the hosted demo. FREE plans only; creating it is an owner decision (see docs/DEPLOY.md).
+# Free Postgres expires 30 days after creation (then a 14-day grace period); export with scripts/db.ts before that.
+services:
+  - type: web
+    name: keel
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: false
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: keel-db
+          property: connectionString
+      - key: KEEL_PG_SCHEMA
+        value: keel
+databases:
+  - name: keel-db
+    plan: free
+    postgresMajorVersion: "16"   # the version the suite is qualified on (CI service postgres:16)

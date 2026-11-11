@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 const lane = (page: import('@playwright/test').Page, name: string) => page.getByRole('article', { name, exact: true });
 
-test('delivery: first screen is a running plan; static fails silently, KEEL repairs and keeps finished work', async ({ page }) => {
+test('delivery: first screen is a running plan; static learns too late, KEEL repairs and keeps finished work', async ({ page }) => {
   await page.goto('/#delivery');
   await expect(lane(page, 'KEEL').getByText('pick · 1042')).toBeVisible();
   await expect(lane(page, 'Static / open loop').getByText('dispatch · 1042 · R1 · T1')).toBeVisible();
@@ -10,7 +10,7 @@ test('delivery: first screen is a running plan; static fails silently, KEEL repa
   await expect(reason).toContainText('I changed my mind because route:R1.status became "closed"', { timeout: 30_000 });
   await expect(reason).toContainText('3 completed steps carried over unchanged');
   await expect(lane(page, 'KEEL').locator('.steps').getByText('request_permit · R2')).toBeVisible();
-  await expect(lane(page, 'Static / open loop')).toContainText('Silent failure', { timeout: 30_000 });
+  await expect(lane(page, 'Static / open loop')).toContainText('Too late', { timeout: 30_000 });
   await expect(lane(page, 'KEEL')).toContainText('delivered via R2', { timeout: 30_000 });
   const score = page.getByRole('region', { name: 'Side-by-side comparison' });
   await expect(score.getByRole('row', { name: /Harmful actions executed/ })).toContainText('1');

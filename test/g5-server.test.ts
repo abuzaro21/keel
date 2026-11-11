@@ -6,6 +6,8 @@ import type { AddressInfo } from 'node:net';
 process.env.KEEL_TICK_MS = '20';
 process.env.KEEL_PLANNER = 'search';
 const { startServer } = await import('../src/server.ts');
+const { TEST_DB, onPostgres, freshSchema } = await import('./helpers.ts');
+const TEST_DB_TARGET = () => { if (onPostgres) process.env.KEEL_PG_SCHEMA = freshSchema(); return TEST_DB; };
 
 type Frame = { id: string | null; data: { runId: string; rows: { n: number }[]; view: { status: string } } };
 async function readFrames(url: string, headers: Record<string, string>, until: (f: Frame[]) => boolean, ms = 8000): Promise<Frame[]> {
@@ -31,7 +33,7 @@ async function readFrames(url: string, headers: Record<string, string>, until: (
 }
 
 test('SSE: a reconnect with Last-Event-ID resumes after the cursor, with no duplicated rows', async () => {
-  const { server } = startServer(0);
+  const { server, hub } = await startServer(0, TEST_DB_TARGET());
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
     const s = await (await fetch(`${base}/api/sessions`, { method: 'POST', body: JSON.stringify({ scenario: 'delivery' }) })).json();
@@ -42,11 +44,11 @@ test('SSE: a reconnect with Last-Event-ID resumes after the cursor, with no dupl
     const second = await readFrames(`${base}/api/sessions/${s.sessionId}/stream`, { 'last-event-id': lastId }, (f) => f.filter((x) => x.data.view.status === 'completed').length >= 2);
     const cursor = new URLSearchParams(lastId);
     for (const f of second) for (const r of f.data.rows) assert.ok(r.n > Number(cursor.get(f.data.runId)), `row ${r.n} of ${f.data.runId} was already delivered before the cursor`);
-  } finally { server.close(); }
+  } finally { server.close(); await hub.close(); }
 });
 
 test('API: only allow-listed observations are injectable; bad bodies are 400; static paths cannot escape', async () => {
-  const { server } = startServer(0);
+  const { server, hub } = await startServer(0, TEST_DB_TARGET());
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
     const s = await (await fetch(`${base}/api/sessions`, { method: 'POST', body: JSON.stringify({ scenario: 'delivery' }) })).json();
@@ -60,5 +62,22 @@ test('API: only allow-listed observations are injectable; bad bodies are 400; st
       const text = await r.text();
       assert.ok(!text.includes('"name": "keel"') && !text.includes('startServer'), `${p} leaked a file`);
     }
-  } finally { server.close(); }
+    const page = await fetch(`${base}/`);
+    await page.arrayBuffer();
+    assert.match(page.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
+    assert.equal(page.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal((await fetch(`${base}/api/scenarios`)).headers.get('x-content-type-options'), 'nosniff');
+  } finally { server.close(); await hub.close(); }
+});
+
+test('client identity: spoofed X-Forwarded-For entries never become the rate-limit key', async () => {
+  const { clientKey } = await import('../src/server.ts');
+  const req = (xff: string, extra: Record<string, string> = {}) => ({ headers: { 'x-forwarded-for': xff, ...extra }, socket: { remoteAddress: '10.0.0.9' } }) as unknown as Parameters<typeof clientKey>[0];
+  assert.equal(clientKey(req('6.6.6.6'), 0, ''), '10.0.0.9', 'no trusted hops: socket address only');
+  assert.equal(clientKey(req('6.6.6.6, 1.2.3.4'), 1, ''), '1.2.3.4', 'one trusted hop: the entry it appended, not the client-written left one');
+  assert.equal(clientKey(req('7.7.7.7, 6.6.6.6, 1.2.3.4, 172.64.0.1'), 2, ''), '1.2.3.4');
+  assert.equal(clientKey(req('1.2.3.4'), 2, ''), '10.0.0.9', 'chain shorter than the trusted hops: fall back to the socket');
+  assert.equal(clientKey(req('6.6.6.6', { 'cf-connecting-ip': '1.2.3.4' }), 0, 'cf-connecting-ip'), '1.2.3.4', 'an edge-overwritten header, when configured');
+  assert.equal(clientKey(req('6.6.6.6', { 'cf-connecting-ip': 'x<script>' }), 0, 'cf-connecting-ip'), '10.0.0.9', 'malformed values are ignored');
+  assert.equal(clientKey(req('6.6.6.6', { 'cf-connecting-ip': '9.9.9.9' }), 0, ''), '10.0.0.9', 'and never used unless configured');
 });

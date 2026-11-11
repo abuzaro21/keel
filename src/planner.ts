@@ -7,7 +7,7 @@ import { flawRepairs, fullReplan } from './repair.ts';
 import type { Candidate, Draft } from './repair.ts';
 import { ctxOf, remainingOf } from './engine.ts';
 import type { RunState } from './engine.ts';
-import { scenarios } from './scenarios.ts';
+import { contractHash as actionsHash, scenarios } from './scenarios.ts';
 
 export type Recording = {
   fingerprint: string; scenario: string; model: string; capturedAt: string;
@@ -32,7 +32,8 @@ export function planningContext(s: RunState) {
     brokenAssumptions: s.lastContradiction?.failures.map((f) => `${f.sig} needs ${f.cond} (now ${f.truth === 'unknown' ? 'UNKNOWN' : JSON.stringify(f.actual)})`) ?? [],
   };
 }
-export const fingerprint = (s: RunState) => sha(JSON.stringify({ scenario: s.scenario, ...planningContext(s) }));
+/** Bound to the planning context AND the executable contracts: a recording never matches if requirements or effects change. */
+export const fingerprint = (s: RunState) => sha(JSON.stringify({ scenario: s.scenario, contracts: actionsHash(scenarios[s.scenario]), ...planningContext(s) }));
 
 export function plannerPrompt(s: RunState): string {
   return [

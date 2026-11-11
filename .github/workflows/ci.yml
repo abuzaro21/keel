@@ -1,0 +1,57 @@
+name: ci
+on:
+  push:
+    branches: [main, 'release/**', 'wip/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: keel
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.13.0
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Node tests (SQLite)
+        run: npm test
+      - name: Node tests (PostgreSQL)
+        run: npm test
+        env:
+          KEEL_TEST_DATABASE_URL: postgres://postgres:ci-only@127.0.0.1:5432/keel
+      - run: npx playwright install --with-deps chromium
+      - name: Browser tests (desktop + mobile)
+        run: npm run test:e2e
+      - name: Dependency audit (runtime deps)
+        run: npm audit --omit=dev --audit-level=high
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t keel:ci .
+      - name: Container starts and answers health checks
+        run: |
+          docker run -d --name keel -p 3000:3000 keel:ci
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:3000/api/health && exit 0; sleep 1; done
+          docker logs keel; exit 1

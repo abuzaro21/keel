@@ -19,7 +19,7 @@ const ingest = (w: WorldState, o: Observation, now = 10) => {
   return { v, w: v.kind === 'applied' ? apply(w, o, v, D.sources) : w };
 };
 
-test('conditions are three-valued: unstable, missing or non-numeric operands are UNKNOWN, never true', () => {
+test('conditions are three-valued: unstable, missing or non-numeric operands are UNKNOWN, never true', async () => {
   const f = { a: 1, b: 2, n: null };
   assert.equal(evalCond({ fact: 'b', op: 'gte', ref: 'n' }, f), 'unknown', '600 >= null must not pass');
   assert.equal(evalCond({ fact: 'a', op: 'lte', ref: 'b' }, f), 'true');
@@ -28,7 +28,7 @@ test('conditions are three-valued: unstable, missing or non-numeric operands are
   assert.equal(evalCond({ fact: 'a', op: 'eq', value: 1 }, f, new Set(['a'])), 'unknown');
 });
 
-test('projection finds the exact broken assumption from contracts, not from scenario code', () => {
+test('projection finds the exact broken assumption from contracts, not from scenario code', async () => {
   const facts = { ...D.facts, 'route:R1.status': 'closed' };
   const p = project(D.domain, D.goal, D.plan, ctx(facts));
   assert.equal(p.ok, false);
@@ -38,7 +38,7 @@ test('projection finds the exact broken assumption from contracts, not from scen
   ]);
 });
 
-test('impact: entity-bound and downstream steps are affected; completed and unrelated steps are preserved', () => {
+test('impact: entity-bound and downstream steps are affected; completed and unrelated steps are preserved', async () => {
   const facts = { ...D.facts, 'route:R1.status': 'closed' };
   const p = project(D.domain, D.goal, D.plan, ctx(facts));
   const imp = impact(D.domain, D.plan, p.failures, new Set(['pick:1042', 'pack:1042']), ['R1']);
@@ -47,20 +47,20 @@ test('impact: entity-bound and downstream steps are affected; completed and unre
   assert.ok(imp.preserved.includes('s3')); // load does not depend on the route
 });
 
-test('a change no remaining step reads is not material', () => {
+test('a change no remaining step reads is not material', async () => {
   const refs = referencedFacts(D.domain, D.goal, D.plan, ctx(D.facts));
   assert.ok(refs.has('route:R1.status'));
   assert.ok(!refs.has('route:R3.status'));
   assert.ok(!refs.has('weather:depot.tempC'));
 });
 
-test('edit distance is a transparent Levenshtein over step signatures', () => {
+test('edit distance is a transparent Levenshtein over step signatures', async () => {
   const a = D.plan;
   assert.equal(editDistance(a, a), 0);
   assert.equal(editDistance(a, a.toSpliced(4, 1, { id: 'x', action: 'dispatch', params: { order: '1042', truck: 'T1', route: 'R2' } })), 1);
 });
 
-test('ingest: duplicate, reused id, unknown source, bad signature, namespace, stale seq, stale time', () => {
+test('ingest: duplicate, reused id, unknown source, bad signature, namespace, stale seq, stale time', async () => {
   let w = initialWorld(D.facts);
   const o1 = obs({ eventId: 'e1', source: 'traffic-authority', seq: 5, fact: 'route:R1.status', value: 'closed', observedAt: 6 });
   let r = ingest(w, o1); assert.equal(r.v.kind, 'applied'); w = r.w;
@@ -77,7 +77,7 @@ test('ingest: duplicate, reused id, unknown source, bad signature, namespace, st
   assert.match((ingest(w, obs({ eventId: 'e9', source: 'traffic-authority', seq: 9, fact: 'route:R2.status', value: 7, observedAt: 7 })).v as { reason: string }).reason, /must be a string/);
 });
 
-test('a forged event cannot reserve the id of the genuine event that follows it', () => {
+test('a forged event cannot reserve the id of the genuine event that follows it', async () => {
   let w = initialWorld(D.facts);
   const genuine = obs({ eventId: 'X', source: 'traffic-authority', seq: 1, fact: 'route:R1.status', value: 'closed', observedAt: 6 });
   const r1 = ingest(w, { ...genuine, sig: 'forged' });
@@ -87,7 +87,7 @@ test('a forged event cannot reserve the id of the genuine event that follows it'
   assert.equal(r2.w.facts['route:R1.status'], 'closed');
 });
 
-test('flapping: repeated value changes make a fact unstable; only an operator confirmation clears it', () => {
+test('flapping: repeated value changes make a fact unstable; only an operator confirmation clears it', async () => {
   let w = initialWorld(D.facts);
   for (let i = 0; i < FLAP_CHANGES; i++) {
     w = ingest(w, obs({ eventId: `f${i}`, source: 'road-sensor-7', seq: i + 1, fact: 'route:R1.status', value: i % 2 ? 'open' : 'closed', observedAt: 2 + i })).w;
@@ -98,7 +98,7 @@ test('flapping: repeated value changes make a fact unstable; only an operator co
   assert.deepEqual(confirm(w, 'route:R1.status', 'closed', 10, 2).unstable, []);
 });
 
-test('the engine never re-evaluates without an input, and forged events change nothing', () => {
+test('the engine never re-evaluates without an input, and forged events change nothing', async () => {
   const start: Ev = { t: 'start', runId: 'r', scenario: 'delivery', context: startContext('delivery', 'keel'), at: 0 };
   const log: Ev[] = [start, ...decide(null, start)];
   const forged: Ev = { t: 'observation', at: 1, obs: obs({ eventId: 'x', source: 'traffic-authority', seq: 1, fact: 'route:R1.status', value: 'closed', observedAt: 1 }, 'wrong-key') };

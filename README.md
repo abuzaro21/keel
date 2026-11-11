@@ -16,14 +16,23 @@ npm ci
 npm run build      # judge UI -> public/
 npm start          # http://localhost:3000
 ```
-Requires Node **24.13+** (uses built-in `node:sqlite` and TypeScript type stripping; zero runtime npm dependencies).
+Requires Node **24.13+** (built-in `node:sqlite` and TypeScript type stripping). One runtime dependency: `pg`, used only when `DATABASE_URL` points at Postgres.
 
 ```bash
-npm test           # 49 tests: engine, durability (real SIGKILL), repair, scenarios, regressions, server
+npm test           # 76 tests: engine, durability (real SIGKILL), repair, scenarios, store, fencing, server, regressions
+KEEL_TEST_DATABASE_URL=postgres://user:pass@host:5432/db npm test   # the same 76 tests on PostgreSQL
 npm run typecheck
 npx playwright install chromium && npx playwright test   # browser tests (desktop + phone)
 ```
-Docker: `docker build -t keel . && docker run -p 3000:3000 keel`.
+Docker: `docker build -t keel . && docker run -p 3000:3000 keel` (SQLite in the container), or add `-e DATABASE_URL=postgres://…` for Postgres. `scripts/hosted-check.sh` SIGKILLs the container mid-run, resumes on a second one, then starts a third to prove the second is fenced. Results of the last runs: [`docs/evidence/`](docs/evidence/).
+
+| Setting | Meaning |
+|---|---|
+| `DATABASE_URL` | `postgres://…` uses Postgres (schema `KEEL_PG_SCHEMA`, default `keel`); otherwise `KEEL_DB` (a SQLite path, default in-memory) |
+| `KEEL_TRUSTED_PROXY_HOPS` | how many reverse proxies append to `X-Forwarded-For` (default 0: the socket address is the client) |
+| `KEEL_CLIENT_IP_HEADER` | optional single header set by a trusted edge (for example `cf-connecting-ip`); off unless set |
+| `KEEL_RETENTION_DAYS` | demo sessions older than this are pruned (default 7) |
+| `KEEL_TICK_MS`, `PORT` | demo clock speed, listen port |
 
 ## What you will see
 
@@ -39,22 +48,24 @@ Every revision shows **"I changed my mind because …"** with the exact observat
 
 ## How it works (one paragraph)
 
-The engine is a pure, event-sourced function: `decide(state, input) → decisions`. Inputs are observations, effect receipts, planner answers and operator commands; nothing ever wakes the agent on a timer. Each action is an executable contract (`requires`, `maintains`, `releases`, `produces`, semantic `effectKey`), so assumptions are derived by code, not written by the planner. A changed fact that any remaining step, live commitment or goal reads triggers a forward projection; a failing condition is a contradiction with an exact cause. Repairs come from a deterministic flaw-directed search and from model proposals; **every candidate is untrusted** and must pass the validator against current beliefs. Commits are optimistic (stale candidates are rejected), side effects carry operation ids and generations and are applied once, and every input plus its decisions is appended atomically to SQLite. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The engine is a pure, event-sourced function: `decide(state, input) → decisions`. Inputs are observations, effect receipts, planner answers and operator commands; nothing ever wakes the agent on a timer. Each action is an executable contract (`requires`, `maintains`, `releases`, `produces`, semantic `effectKey`), so assumptions are derived by code, not written by the planner. A changed fact that any remaining step, live commitment or goal reads triggers a forward projection; a failing condition is a contradiction with an exact cause. Repairs come from a deterministic flaw-directed search and from model proposals; **every candidate is untrusted** and must pass the validator against current beliefs. Commits are optimistic (stale candidates are rejected), side effects carry operation ids and generations and are applied once, and every input plus its decisions is appended atomically to SQLite or Postgres. A process claims the database with an owner epoch; a replaced process is fenced and cannot write again. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## AI usage — honest disclosure
 
 - **Inside the product.** A language model proposes repair candidates. The public demo uses **recorded genuine outputs** of `claude-sonnet-5-5` (captured with `scripts/record-planner.ts` through the Claude Code CLI; serving model taken from CLI metadata; prompt and response stored with sha256 in `fixtures/planner-recordings.json`). A recording is used only when the full planning context hashes identically; it is then **validated against the live run like any other candidate** and labelled "recorded model output · validated now". Any change a visitor injects produces a new context and falls back to the labelled deterministic search. Replayed outputs are never presented as fresh inference. No API key is needed; there is no live-model mode in this release.
   - Observed: in the flapping scenario the model proposed obtaining the reversible permit *before* the irreversible packing step — a valid reordering the deterministic search does not produce.
-- **Building it.** Designed and implemented by Claude (Anthropic, Claude Code) with OpenAI Codex (`gpt-6.1-sol`) as independent co-architect and adversarial reviewer: independent architectures, cross-examination, and code-level gate reviews that found real defects (fixed with regression tests). The owner directed the work and makes the release decisions.
+- **Building it.** Designed and implemented by Claude (Anthropic, Claude Code) with OpenAI Codex (`gpt-6.1-sol`) as independent co-architect and adversarial reviewer: independent architectures, cross-examination, and code-level gate reviews that found real defects (nine review rounds found 14, 3, 4, 3, 3, 3, 1, 2 and 1 issues, the last verdict SHIP WITH NOTES; each fix has a regression test in `test/g8-*` to `test/g12-*`). The owner directed the work and makes the release decisions.
+- **The film.** Every UI frame is a real screen capture of this build (`film/capture.mjs`); edits are cuts, crops and on-screen-labelled speed changes. The narration is a synthetic voice (Kokoro-82M, run locally); the music is synthesised by ffmpeg. See [film/storyboard.md](film/storyboard.md).
 
 ## Limitations (stated, not hidden)
 
 - The world, its sources and their HMAC keys are simulated; signatures show the mechanism, not real-world authentication. Producer epochs/key rotation are out of scope.
 - Planning domains are small; the search is bounded breadth-first with explicit caps. Real catalogues would need heuristics.
 - The engine guarantees "no *next* step on a broken assumption" and fences operations still in their preparation window; it cannot stop an effect that has already been applied — it reconciles and, if needed, stops.
-- Hosted demo storage: SQLite lives for the container's life. Crash recovery is real (tested with `SIGKILL` in a child process; demonstrable in the UI), but a host redeploy or idle spin-down starts a fresh demo database.
+- Hosted storage: with Postgres, sessions survive restarts, redeploys and idle spin-down. A free Render Postgres expires 30 days after creation (14-day grace); export with `scripts/db.ts` before then. Without `DATABASE_URL` the container's SQLite lives only as long as the container.
+- Ownership fencing assumes one database and one active process; it is not a multi-writer cluster. Demo sessions older than the retention window are pruned.
 - Not every changed situation is recoverable: when the truck is already in transit on a road that closes, KEEL stops rather than pretending.
 - Thresholds (flap = 3 changes in 30 ticks; 3 revisions; 12 planning requests) are demo values, not tuned.
 
 ## Documents
-- [Architecture](docs/ARCHITECTURE.md) · [Two-year thesis](docs/THESIS.md) · [Failure test](docs/FAILURE-TEST.md)
+- [Architecture](docs/ARCHITECTURE.md) · [Two-year thesis](docs/THESIS.md) · [Failure test](docs/FAILURE-TEST.md) · [Security](docs/SECURITY.md) · [Deploy](docs/DEPLOY.md) · [Submission sheet](docs/SUBMISSION.md) · [Film](film/storyboard.md) · [Evidence](docs/evidence/)

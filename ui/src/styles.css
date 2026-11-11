@@ -164,3 +164,13 @@ td { font-family: var(--mono); font-size: 13px; }
   .chain div, .outcome div { grid-template-columns: 1fr; gap: 0; }
   .sim { order: -1; }
 }
+
+.intro { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--teal); border-radius: var(--r); padding: 14px 18px; box-shadow: var(--shadow); display: grid; gap: 10px; }
+.intro .thesis { margin: 0; font-size: 17px; font-weight: 600; }
+.intro .beats { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; counter-reset: beat; }
+.intro .beats li { counter-increment: beat; color: var(--muted); font-size: 13.5px; padding-left: 28px; position: relative; }
+.intro .beats li::before { content: counter(beat); position: absolute; left: 0; top: 0; width: 20px; height: 20px; border-radius: 50%; background: var(--teal-bg); color: var(--teal); font: 600 12px/20px var(--mono); text-align: center; }
+.intro .beats b { color: var(--ink); font-weight: 600; display: block; }
+.intro .watch { margin: 0; font-size: 13.5px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.intro .watch .eyebrow { color: var(--teal); }
+@media (max-width: 820px) { .intro .beats { grid-template-columns: 1fr; gap: 8px; } }

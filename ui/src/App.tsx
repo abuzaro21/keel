@@ -37,6 +37,12 @@ const SCENARIO_TABS: { id: string; label: string; sub: string }[] = [
   { id: 'flapping', label: 'Adaptation failure', sub: 'a faulty sensor flaps' },
 ];
 
+const WATCH: Record<string, string> = {
+  delivery: 'around t6 the traffic authority closes route R1 — after the order was picked, packed and loaded. Compare what each lane does next.',
+  recovery: 'region-b degrades while the traffic shift to it is already in flight. Only one lane fences that operation before its effect lands.',
+  flapping: 'a low-trust sensor flips the roads open/closed and a forged closure arrives from an unregistered source. Adapting to every change is the failure here.',
+};
+
 const pretty = (sig: string) => sig.replace(/\(([^)]*)\)/, (_, a: string) => (a ? ` · ${a.split(',').map((x) => x.split('=')[1]).join(' · ')}` : ''));
 const short = (fact: string) => fact.replace(/^order:1042\./, 'order.').replace(/^route:/, '').replace(/^svc:/, '');
 
@@ -116,6 +122,16 @@ export function App() {
       </header>
 
       {error && <div className="error" role="alert">{error}</div>}
+
+      <section className="intro" aria-label="What you are watching">
+        <p className="thesis">Two agents get the same goal, the same plan and the same simulated world. Mid-run, reality changes.</p>
+        <ol className="beats">
+          <li><b>Assumptions are data.</b> Every step declares what must be true for it to work; KEEL re-checks them on every material event — never on a timer.</li>
+          <li><b>Finished work stays finished.</b> Steps with receipts are kept; only the broken part of the plan is repaired, and every repair must pass an independent checker.</li>
+          <li><b>When it can’t be sure, it stops.</b> Forged, out-of-order or flapping evidence is refused or held as UNKNOWN until an operator confirms.</li>
+        </ol>
+        <p className="watch"><span className="eyebrow">Watch for</span>{WATCH[scenario] ?? ''}</p>
+      </section>
 
       {sc && keel && (
         <section className="goal" aria-label="Goal">
@@ -210,16 +226,17 @@ function Lane({ run, tickMs, tick, onOperator, onCrash, busy }: { run: Run; tick
       {last && adaptive && <ReasonCard rev={last} count={revs.length} />}
 
       {finished && (
-        <div className={`outcome ${m.outcomePending ? 'wait' : m.goalMet ? 'ok' : 'bad'}`} aria-live="polite">
-          <div><span className="eyebrow">Agent believes</span><strong>{m.beliefGoalMet === null ? (v.status === 'paused' ? 'stopped — goal not reached' : '—') : m.beliefGoalMet ? '✓ goal met' : '✗ goal not met'}</strong></div>
+        <div className={`outcome ${m.outcomePending || (v.status === 'paused' && !m.invalidActions) ? 'wait' : m.goalMet ? 'ok' : 'bad'}`} aria-live="polite">
+          <div><span className="eyebrow">Agent believes</span><strong>{m.beliefGoalMet === null ? (v.status === 'paused' ? 'paused — goal not reached yet; waiting for an operator' : v.status === 'stopped' ? 'stopped — goal not reached' : '—') : m.beliefGoalMet ? '✓ goal met' : '✗ goal not met'}</strong></div>
           <div><span className="eyebrow">Simulated world</span><strong>{m.outcomePending ? '… ' : m.goalMet ? '✓ ' : '✗ '}{m.truth}</strong></div>
           {m.violations.length > 0 && <div><span className="eyebrow">Known violation</span><span>{m.violations.join('; ')}</span></div>}
           {completed && m.beliefGoalMet && !m.goalMet && !m.outcomePending && <p className="silent">Silent failure: every step has a receipt, the agent reports success, and the world disagrees.</p>}
+          {completed && m.beliefGoalMet === false && m.invalidActions > 0 && <p className="silent">Too late: every irreversible step ran on the original plan; the agent learned it had failed only afterwards.</p>}
         </div>
       )}
 
       {adaptive && v.policy === 'keel' && (
-        <button className="crash" disabled={busy || v.status === 'completed'} onClick={onCrash} title="Drops every piece of in-memory agent state and agent timers for this run, then rebuilds the agent from the SQLite event log.">
+        <button className="crash" disabled={busy || v.status === 'completed'} onClick={onCrash} title="Drops every piece of in-memory agent state and agent timers for this run, then rebuilds the agent from the persisted event log.">
           Crash the agent <small>rebuild from the log</small>
         </button>
       )}

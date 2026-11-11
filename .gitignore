@@ -9,3 +9,5 @@ test-results/
 playwright-report/
 test-results/
 playwright-report/
+film/out/
+.env.*

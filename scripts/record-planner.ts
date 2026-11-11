@@ -37,15 +37,16 @@ class RecordingPlanner extends Planner {
 }
 
 for (const scenario of ['delivery', 'recovery', 'flapping']) {
-  const hub = new Hub();
+  const hub = await Hub.open(':memory:');
   hub.planner = new RecordingPlanner(new URL('file:///nonexistent'));
-  const s = new Session(hub, `rec-${scenario}`, scenario, ['keel']).start().runToEnd();
+  const s = await (await Session.create(hub, `rec-${scenario}`, scenario, ['keel'])).runToEnd();
   if (scenario === 'flapping') {
     const id = `rec-${scenario}-keel`;
-    for (const f of hub.state(id)!.world.unstable) hub.submit(id, { t: 'operator', cmd: 'confirm', fact: f, value: hub.state(id)!.world.facts[f], at: s.tick }, s);
-    hub.submit(id, { t: 'operator', cmd: 'resume', at: s.tick }, s);
-    s.runToEnd();
+    for (const f of hub.state(id)!.world.unstable) await hub.submit(id, { t: 'operator', cmd: 'confirm', fact: f, value: hub.state(id)!.world.facts[f], at: s.tick }, s);
+    await hub.submit(id, { t: 'operator', cmd: 'resume', at: s.tick }, s);
+    await s.runToEnd();
   }
+  await hub.close();
 }
 mkdirSync(new URL('../fixtures/', import.meta.url), { recursive: true });
 writeFileSync(out, JSON.stringify(recordings, null, 2) + '\n');
