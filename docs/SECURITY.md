@@ -51,7 +51,7 @@ Tested in `test/g5-server.test.ts` (spoofed leftmost entries, 0/1/2 hops, malfor
 ## Database ownership
 
 Each process claims the database on start (`owner.epoch + 1`). Every write re-checks the epoch under a lock and fails with
-`FencedError` if a newer process has claimed, including maintenance writes (prune, restore). A fenced process stops its
+`FencedError` if a newer process has claimed, including maintenance writes (prune, restore); `scripts/db.ts import` claims the database before it checks and restores it. A fenced process stops its
 sessions and answers 503. This prevents a deploy overlap from applying a simulated effect twice. Evidence:
 `docs/evidence/hosted-check.txt`.
 

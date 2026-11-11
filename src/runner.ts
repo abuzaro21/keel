@@ -193,6 +193,8 @@ export class Session {
   /** The clock iteration in progress (eviction waits for it before dropping caches). */
   private ticking: Promise<void> = Promise.resolve();
   closed = false;
+  /** Fully loaded (started or resumed). Only a ready session may be evicted: closing one mid-start would leave a run without its start event. */
+  ready = false;
   private ms = 0;
   runIds: string[];
   hub: Hub; id: string; scenario: string; policyNames: PolicyName[];
@@ -212,6 +214,7 @@ export class Session {
     const s = new Session(hub, id, scenario, policyNames);
     hub.sessions.set(id, s); // its own start-up inputs need it reachable (presentation looks up the clock)
     try { await s.start(); } catch (e) { hub.sessions.delete(id); throw e; }
+    s.ready = true;
     return s;
   }
 
@@ -259,6 +262,7 @@ export class Session {
       const st = hub.state(r.runId);
       if (st && st.status !== 'completed' && st.status !== 'stopped') await hub.submit(r.runId, { t: 'recover', at: s.tick }, s);
     }
+    s.ready = true;
     hub.sessions.set(id, s); // published only now: a concurrent request never sees a half-loaded session
     return s;
   }

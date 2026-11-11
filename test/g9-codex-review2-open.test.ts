@@ -59,7 +59,8 @@ test('B: evicting a session mid-tick never runs work on dropped caches; late cal
 
 type Frame = { id: string; runId: string; rows: { n: number }[] };
 async function frames(url: string, lastId: string, until: (f: Frame[]) => boolean) {
-  const res = await fetch(url, { headers: lastId ? { 'last-event-id': lastId } : {} });
+  const signal = AbortSignal.timeout(15_000); // a stuck stream fails the test instead of hanging the process
+  const res = await fetch(url, { headers: lastId ? { 'last-event-id': lastId } : {}, signal });
   const reader = res.body!.getReader();
   const out: Frame[] = [];
   let buf = '';
@@ -78,12 +79,14 @@ async function frames(url: string, lastId: string, until: (f: Frame[]) => boolea
       if (id !== undefined && data) out.push({ id, ...JSON.parse(data) });
     }
   }
+  if (signal.aborted) throw new Error('stream timed out');
   if (!closed) await reader.cancel().catch(() => {});
   return { out, closed };
 }
 
 test('C: a frame that fails to build closes the stream; the reconnect backfills every skipped row', { timeout: 30_000 }, async () => {
-  process.env.KEEL_TICK_MS = '40';
+  // No automatic ticks: the test drives the clock itself, so the failure always hits a live broadcast (not timing).
+  process.env.KEEL_TICK_MS = '3600000';
   const { startServer } = await import('../src/server.ts');
   const dir = mkdtempSync(join(tmpdir(), 'keel-sse-'));
   const target = onPostgres ? TEST_DB : join(dir, 'k.db');
@@ -93,17 +96,23 @@ test('C: a frame that fails to build closes the stream; the reconnect backfills 
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     const s = await (await fetch(`${base}/api/sessions`, { method: 'POST', body: JSON.stringify({ scenario: 'delivery' }) })).json();
     const url = `${base}/api/sessions/${s.sessionId}/stream`;
-    // break exactly one frame build after the first frames arrive
-    let fail = false;
     const get = hub.sessions.get.bind(hub.sessions);
+    const sess = get(s.sessionId)!;
+    // break exactly one frame build: the next broadcast after the catch-up frames have arrived
+    let fail = false;
     hub.sessions.get = (k: string) => { if (fail) { fail = false; throw new Error('injected payload failure'); } return get(k); };
     let armed = false;
-    const first = await frames(url, '', (f) => { if (f.length >= 3 && !armed) { armed = true; fail = true; } return false; });
+    const first = await frames(url, '', (f) => {
+      if (f.length && !armed) { armed = true; fail = true; void sess.advanceClock(); } // the tick broadcast builds a frame
+      return false;
+    });
     assert.ok(first.closed, 'the server closed the stream instead of skipping rows');
     const lastId = first.out.at(-1)!.id;
     const seen = new Map<string, number>(first.out.flatMap((f) => f.rows.map((r) => [f.runId, r.n] as [string, number])));
     const cursor = new URLSearchParams(lastId);
     for (const [r, n] of seen) assert.ok(Number(cursor.get(r)) >= n);
+    // rows committed while disconnected
+    for (let i = 0; i < 12; i++) { await sess.runDue(); await sess.advanceClock(); }
     // reconnect with the last id: the next rows of every lane must start exactly after the cursor
     const second = await frames(url, lastId, (f) => s.runIds.every((r: string) => f.some((x) => x.runId === r && x.rows.length)));
     for (const r of s.runIds) {

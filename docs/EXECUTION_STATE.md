@@ -19,31 +19,32 @@ Update this file at every milestone. Another agent must be able to resume from i
 - The 2 failures are the recorded-model tests: the fingerprint now covers the action contracts, which changed,
   so the October recordings no longer match (correct behaviour — they must be re-captured, not edited).
 
-## Gates (2026-11-11, branch `wip/async-persistence`, local only)
+## Gates (2026-11-11, branch `wip/async-persistence`, release tag `v1.0.0`)
 | Gate | State | Evidence |
 |---|---|---|
 | A source integrity | PASS | checkpoint `c731622`; only `E:\doo\keel` touched; no force push, no history rewrite |
 | B engine invariants | PASS | `npm test` (replay, crash-at-every-point, ack loss, SIGKILL) |
-| C database | PASS | 63/63 on SQLite and on Postgres 16; store contract (g7), fencing (g8/g9), export/import SQLite→PG verified |
+| C database | PASS | 66/66 on SQLite and on Postgres 16; store contract (g7), fencing (g8/g9/g10), export/import |
 | D scenarios | PASS | g3g4, R1-6 regression (a "stuck" report never counts as success) |
 | E browser | PASS | `docs/evidence/test-e2e.txt` 10/10 desktop + phone |
-| F security | PASS (local) | Codex reviews #1 (14 findings) and #2 (3 open items) all fixed with regressions; CSP/nosniff; XFF policy tested; audit 0 vulns; `docs/SECURITY.md` |
-| G deployment | READY, NOT DONE: owner approval | Docker image healthy; `scripts/hosted-check.sh` on Postgres (`docs/evidence/hosted-check.txt`); `render.yaml` + `docs/DEPLOY.md` |
-| H release | local tag only | film built; docs complete; push/visibility/upload/submission need the owner |
+| F security | PASS (local) | Codex reviews #1 (14), #2 (3), final (4: import fencing, eviction during start-up, evicted view 500, SSE test timing) all fixed with regressions; CSP/nosniff; XFF policy tested; audit 0 vulns |
+| G deployment | READY, NOT DONE: owner approval | Render workspace "KEEL" exists and is empty (API, 2026-11-11); Docker hosted-check on Postgres; `render.yaml` + `docs/DEPLOY.md` |
+| H film | DONE (local) | `film/out/keel-film-final.mp4` 89.93 s, logo reveal ending; ASR + loudness + frame checks in `film/storyboard.md`; no human listening review yet |
+| I release | BLOCKED on push | `git push` was refused twice by the session's permission classifier ("Out-of-Place Publication") although the owner's directive authorizes pushing to the private repo; the owner runs the push (commands below) |
 
 ## Done
-- Codex review #1 and #2 findings fixed (`aabcfcd`): owner-epoch fencing incl. prune/restore, eviction quiesce, SSE gap close.
+- Codex review #1 and #2 findings fixed (`aabcfcd`); final review findings fixed with `test/g10-codex-final.test.ts` and a deterministic SSE test C.
 - Recorded model proposals re-captured 2026-11-11 (`claude -p`, served claude-sonnet-5-5).
-- Film: `film/capture.mjs` (real captures), `film/tts.py` (Kokoro-82M), `film/build.mjs` (ffmpeg), `film/storyboard.md`,
-  `film/keel-film.srt`. Output `film/out/keel-film.mp4` (git-ignored; rebuild with the commands in the storyboard).
-- Docs: README, ARCHITECTURE (persistence section), FAILURE-TEST (process-level table), SECURITY, DEPLOY, SUBMISSION.
-- Security headers on static responses (tested in g5).
+- Film: `film/capture.mjs` (real captures), `film/tts.py` (Kokoro-82M), `film/build.mjs` (ffmpeg + frame-rendered logo reveal),
+  `film/storyboard.md`, `film/keel-film.srt`. Output `film/out/keel-film-final.mp4` (git-ignored, ~30 MB).
+- Docs: README, ARCHITECTURE, FAILURE-TEST, SECURITY, DEPLOY, SUBMISSION, THESIS.
 
 ## Next (owner decisions; nothing below has been done)
-1. Push `wip/async-persistence` to the private repo and merge to `main` (CI then runs on GitHub).
-2. Create the Render free web service + free Postgres from `render.yaml` in the "keel" workspace.
+1. Push and open CI: `git push -u origin wip/async-persistence && git push origin v1.0.0`; when CI is green, merge to `main`
+   (`gh pr create --base main --head wip/async-persistence`, then merge without squashing history).
+2. Approve creating the Render free web service + free Postgres from `render.yaml` in workspace "KEEL" (expires 30 days after creation).
 3. Make the repository public; upload the film; submit on build.doo.ooo (confirm deadline time zone and deliverables there).
-4. Listen to the film once: the narration is synthetic and was checked by duration and captions, not by ear.
+4. Listen to the film once: the narration was checked by ASR, not by ear.
 
 ## Resume commands
 ```

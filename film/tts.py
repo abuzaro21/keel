@@ -10,7 +10,7 @@ out = here / 'out' / 'audio'
 out.mkdir(parents=True, exist_ok=True)
 pipe = KPipeline(lang_code='a', repo_id='hexgrad/Kokoro-82M')
 durations = {}
-SAY = {'KEEL': 'Keel', 'R1': 'R one', 'R2': 'R two', 'SQLite': 'S Q Lite'}  # pronunciation only; captions keep the text
+SAY = {'KEEL': 'Keel', 'R1': 'R one', 'R2': 'R two', 'SQLite': 'S Q Lite', 'region C': 'region, C'}  # pronunciation only; captions keep the text
 def say(t):
     for a, b in SAY.items(): t = t.replace(a, b)
     return t

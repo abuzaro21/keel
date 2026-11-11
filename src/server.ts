@@ -78,7 +78,10 @@ export async function runView(hub: Hub, runId: string) {
     plan: { version: s.plan.version, steps: stepView(s) }, history: s.plans.map((p) => ({ version: p.version, steps: p.steps.map((x) => ({ id: x.id, sig: stepSig(x) })) })),
     revisions: s.revisions, budget: s.budget, goal: s.goal,
     facts: s.world.facts, unstable: s.world.unstable, worldRev: s.world.rev,
-    metrics: await runMetrics(hub.store, hub.sim, runId),
+    metrics: await runMetrics(hub.store, hub.sim, runId).catch((e) => {
+      if (!hub.state(runId)) throw new SessionClosedError(runId); // evicted while the metrics read the store
+      throw e;
+    }),
   };
 }
 
@@ -314,8 +317,8 @@ async function stream(req: IncomingMessage, res: ServerResponse, hub: Hub, s: Se
 }
 
 /** Stop the oldest session, let its in-flight inputs finish (an effect mid-way needs its caches), then drop the caches. */
-function evictOldest(hub: Hub, streams: Map<string, Set<Conn>>): { id: string; done: Promise<void> } | null {
-  const first = hub.sessions.entries().next().value;
+export function evictOldest(hub: Hub, streams: Map<string, Set<Conn>>): { id: string; done: Promise<void> } | null {
+  const first = [...hub.sessions].find(([, x]) => x.ready); // a session still starting is skipped
   if (!first) return null;
   const [id, s] = first;
   s.close();

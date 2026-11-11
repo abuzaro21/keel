@@ -1,8 +1,8 @@
 {
   "commit": "aabcfcd",
   "rows": [
-    ["63 / 63", "engine, store and server tests on SQLite", "docs/evidence/test-sqlite.txt"],
-    ["63 / 63", "the same suite on PostgreSQL 16", "docs/evidence/test-postgres.txt"],
+    ["66 / 66", "engine, store and server tests on SQLite", "docs/evidence/test-sqlite.txt"],
+    ["66 / 66", "the same suite on PostgreSQL 16", "docs/evidence/test-postgres.txt"],
     ["10 / 10", "browser tests, desktop and phone (Playwright)", "docs/evidence/test-e2e.txt"],
     ["0", "duplicate effects after SIGKILL mid-run, Docker image on Postgres", "docs/evidence/hosted-check.txt"],
     ["503", "an old instance gets once a new one takes over the database", "docs/evidence/hosted-check.txt"]

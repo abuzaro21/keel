@@ -9,8 +9,8 @@ Status: **not submitted.** Submission, public visibility, the hosted URL and the
 | Project | KEEL: *The plan can change. The goal stays.* |
 | One line | An agent that notices which of its assumptions a change broke, repairs only that part of its plan, keeps the work already done, and stops when the world is too unstable to trust. |
 | Repository | https://github.com/abuzaro21/keel (private until the owner makes it public) |
-| Hosted demo | not deployed; plan in [DEPLOY.md](DEPLOY.md) |
-| Video | `film/out/keel-film.mp4` (94 s, 1920x1080, 30 fps, H.264/AAC, burned-in captions) + `film/keel-film.srt`; built by `film/build.mjs`; not uploaded |
+| Hosted demo | not deployed. The Render workspace "KEEL" exists and is empty (checked 2026-11-11); creating the free service + database needs owner approval. Plan in [DEPLOY.md](DEPLOY.md) |
+| Video | `film/out/keel-film-final.mp4` (89.9 s, 1920x1080, 30 fps, H.264/AAC, burned-in captions, closing logo reveal) + `film/keel-film.srt`; built by `film/build.mjs`; git-ignored; not uploaded. Narration checked by ASR, not yet by a human listener ([storyboard](../film/storyboard.md#automated-audio-and-picture-checks-2026-11-11)) |
 | Thesis | [THESIS.md](THESIS.md) (266 words) |
 | Failure test | [FAILURE-TEST.md](FAILURE-TEST.md) |
 | Architecture | [ARCHITECTURE.md](ARCHITECTURE.md) |
@@ -25,15 +25,16 @@ Status: **not submitted.** Submission, public visibility, the hosted URL and the
 3. Any tab: **Crash the agent**. It rebuilds from the log; the audit trace shows `fenced … no effect was attempted`.
 4. **Change reality** buttons: inject your own (simulated, signed) observation, or a forgery.
 
-## Evidence (all from runs at commit `aabcfcd` or later)
+## Evidence (runs at the release commit; each log names its commit)
 
 | Check | Result | Log |
 |---|---|---|
-| Test suite on SQLite | 63 / 63 | [evidence/test-sqlite.txt](evidence/test-sqlite.txt) |
-| Same suite on PostgreSQL 16 | 63 / 63 | [evidence/test-postgres.txt](evidence/test-postgres.txt) |
+| Test suite on SQLite | 66 / 66 | [evidence/test-sqlite.txt](evidence/test-sqlite.txt) |
+| Same suite on PostgreSQL 16 | 66 / 66 | [evidence/test-postgres.txt](evidence/test-postgres.txt) |
 | Browser tests, desktop + phone | 10 / 10 | [evidence/test-e2e.txt](evidence/test-e2e.txt) |
 | SIGKILL + resume + takeover, Docker on Postgres | 0 duplicate effects; old instance 503 | [evidence/hosted-check.txt](evidence/hosted-check.txt) |
-| `npm audit --omit=dev` | 0 vulnerabilities | CI |
+| `npm audit --omit=dev` | 0 vulnerabilities | local run; CI job |
+| Independent review (Codex gpt-6.1-sol) | 3 rounds: 14, 3, then 4 findings; all fixed with regression tests | `test/g8-*`, `test/g9-*`, `test/g10-*` |
 
 ## Honesty notes for the form
 

@@ -1,6 +1,6 @@
-// Builds the ~90 s KEEL film from REAL captures (film/capture.mjs), the synthetic narration (film/tts.py) and an
+// Builds the <=90 s KEEL film from REAL captures (film/capture.mjs), the synthetic narration (film/tts.py) and an
 // ffmpeg-synthesised music bed. Editing is cuts, restrained crops and marked speed changes only; no UI is faked.
-// Output: film/out/keel-film.mp4 (1920x1080, 30 fps, H.264 + AAC) and film/keel-film.srt.
+// Output: film/out/keel-film-final.mp4 (1920x1080, 30 fps, H.264 + AAC) and film/keel-film.srt.
 // Usage: node film/capture.mjs && python film/tts.py && node film/build.mjs
 import { chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
@@ -24,22 +24,22 @@ const ff = (...args) => execFileSync('ffmpeg', ['-v', 'error', '-y', ...args], {
 const BASE = [118, 0, 1300];
 const m = (clip, k, d = 0) => marks[clip][k] + d;
 const scenes = [
-  { card: 'title', len: 7.0, cues: [['title', 0, 0.4]] },
+  { card: 'title', len: 5.9, cues: [['title', 0, 0.3]] },
   {
     chip: 'Scenario A · Delivery: a road closes after packing',
     shots: [
-      { clip: 'delivery', from: m('delivery', 'loaded', 0.8), to: m('delivery', 'revision'), dur: 6.1 },
-      { clip: 'delivery', from: m('delivery', 'revision'), to: m('delivery', 'revision', 3.8), dur: 10.3, box: [458, 150, 960] },
+      { clip: 'delivery', from: m('delivery', 'loaded', 0.8), to: m('delivery', 'revision'), dur: 5.4 },
+      { clip: 'delivery', from: m('delivery', 'revision'), to: m('delivery', 'revision', 3.8), dur: 9.3, box: [458, 150, 960] },
       { clip: 'delivery', from: m('delivery', 'revision', 3.8), to: m('delivery', 'scorecard') },
       { clip: 'delivery', from: m('delivery', 'scorecard'), to: m('delivery', 'end') },
     ],
-    cues: [['delivery', 0, 0.3], ['delivery2', 2, 0.2], ['scorecard', 3, 0.2]],
+    cues: [['delivery', 0, 0.3], ['delivery2', 2, 0.6], ['scorecard', 3, 0.2]],
   },
   {
     chip: 'Scenario B · Service recovery: the failover target degrades',
     shots: [
       { clip: 'recovery', from: m('recovery', 'loaded', 0.6), to: m('recovery', 'revision') },
-      { clip: 'recovery', from: m('recovery', 'revision'), to: m('recovery', 'revision', 3.3), dur: 6.0, box: [458, 60, 960] },
+      { clip: 'recovery', from: m('recovery', 'revision'), to: m('recovery', 'revision', 3.3), dur: 5.1, box: [458, 60, 960] },
       // the static lane's outcome card is on screen from about revision+3.5 until the page scrolls at keel-outcome
       { clip: 'recovery', from: m('recovery', 'revision', 3.3), to: m('recovery', 'keel-outcome', 0.2), dur: 5.0 },
       { clip: 'recovery', from: m('recovery', 'keel-outcome', 0.2), to: m('recovery', 'end', -1.0) },
@@ -49,9 +49,9 @@ const scenes = [
   {
     chip: 'Scenario C · Adaptation failure: a sensor flaps, a report is forged',
     shots: [
-      { clip: 'flapping', from: m('flapping', 'loaded', 0.8), to: m('flapping', 'forgery-rejected') },
+      { clip: 'flapping', from: m('flapping', 'loaded', 1.5), to: m('flapping', 'forgery-rejected') },
       { clip: 'flapping', from: m('flapping', 'forgery-rejected'), to: m('flapping', 'keel-paused', -0.1), box: [118, 140, 1040] },
-      { clip: 'flapping', from: m('flapping', 'keel-paused', -0.1), to: m('flapping', 'confirmed', 0.2) },
+      { clip: 'flapping', from: m('flapping', 'keel-paused', -0.1), to: m('flapping', 'confirmed', 0.2), dur: 4.6 },
       { clip: 'flapping', from: m('flapping', 'confirmed', 0.2), to: m('flapping', 'keel-outcome'), dur: 4.0 },
       { clip: 'flapping', from: m('flapping', 'keel-outcome'), to: m('flapping', 'end', -0.6) },
     ],
@@ -60,13 +60,16 @@ const scenes = [
   {
     chip: 'Crash and recover: the agent process dies mid-step',
     shots: [
-      { clip: 'engine', from: m('engine', 'crashed', -3.0), to: m('engine', 'crashed', 1.8), box: [458, 120, 960] },
+      { clip: 'engine', from: m('engine', 'crashed', -2.2), to: m('engine', 'crashed', 1.8), box: [458, 120, 960] },
       { clip: 'engine', from: m('engine', 'crashed', 1.8), to: m('engine', 'keel-outcome'), dur: 2.1 },
       { clip: 'engine', from: m('engine', 'trace'), to: m('engine', 'end', -0.1), box: [0, 300, 1000] },
     ],
     cues: [['engine', 0, 0.6]],
   },
-  { card: 'proof', len: 12.4, cues: [['proof', 0, 0.5]] },
+  { card: 'proof', len: 7.9, cues: [['proof', 0, 0.35]] },
+  // closing reveal of the logo from ui/public/keel.svg (dark theme tokens); frame-rendered, no burned-in caption: the
+  // spoken line is the on-screen tagline
+  { card: 'logo', len: 7.0, nocap: true, cues: [['logo', 0, 2.9]] },
 ];
 
 // ------------------------------------------------------------------ overlays and cards (HTML -> PNG)
@@ -93,6 +96,52 @@ body.clear { background: transparent; } body.card { background: var(--bg); displ
 .proof .credits { margin-top:40px; font-size:21px; color:var(--muted); line-height:1.5; } .proof .end { margin-top:30px; font-size:34px; font-weight:600; }
 `;
 const LOGO = `<svg class="logo" viewBox="0 0 64 64"><path d="M7 19 H57" class="old"/><path d="M7 19 H27 L47 9 H55" class="new"/><path d="M51 5 L57 9 L51 13" class="new"/><path d="M5 28 H59" class="water"/><path d="M24 28 H40 L34.5 55 Q32 58 29.5 55 Z" class="fin"/></svg>`;
+// The closing reveal: the same five paths as ui/public/keel.svg in the UI's dark-theme colours. window.render(t) sets
+// every property from t alone, so each frame is deterministic. Course of events: light comes up, the waterline draws,
+// the keel lowers, the old course appears, the repaired course and its arrow draw, the wordmark settles, one sheen
+// crosses it, the tagline arrives, then the composition holds still.
+const LOGO_REVEAL = `<!doctype html><html><head><meta charset="utf-8"><style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@500;700&display=swap');
+html, body { margin:0; width:${W}px; height:${H}px; background:#05090d; overflow:hidden; font-family:'IBM Plex Sans',sans-serif; }
+#root { position:absolute; inset:0; background:radial-gradient(ellipse 120% 90% at 50% 45%, #0d1a25 0%, #0a141d 45%, #04080b 100%); }
+#light { position:absolute; left:50%; top:40%; width:1500px; height:1000px; border-radius:50%;
+  background:radial-gradient(closest-side, rgba(62,194,191,.16), rgba(62,194,191,.05) 55%, transparent); }
+#stage { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+svg { width:300px; height:300px; overflow:visible; }
+.old { fill:none; stroke:#3ec2bf; stroke-width:3; stroke-dasharray:4 4; stroke-linecap:round; }
+.new { fill:none; stroke:#3ec2bf; stroke-width:3.5; stroke-linecap:round; stroke-linejoin:round; }
+.water { stroke:#e5edf2; stroke-width:3.5; stroke-linecap:round; } .fin { fill:#e5edf2; }
+.word { position:relative; margin-top:18px; font-size:150px; font-weight:700; color:#e5edf2; line-height:1; }
+.sheen { position:absolute; inset:0; color:transparent; -webkit-background-clip:text; background-clip:text; background-repeat:no-repeat;
+  background-image:linear-gradient(100deg, transparent 40%, rgba(255,255,255,.9) 50%, transparent 60%); background-size:300% 100%; }
+.tag { margin-top:34px; font-size:46px; font-weight:500; color:#b8c7d3; letter-spacing:.01em; }
+</style></head><body><div id="root"><div id="light"></div><div id="stage">
+<svg viewBox="0 0 64 64"><path id="old" d="M7 19 H57" class="old"/><path id="nw" d="M7 19 H27 L47 9 H55" class="new"/><path id="arrow" d="M51 5 L57 9 L51 13" class="new"/><path id="water" d="M5 28 H59" class="water"/><path id="fin" d="M24 28 H40 L34.5 55 Q32 58 29.5 55 Z" class="fin"/></svg>
+<div class="word" id="word">KEEL<div class="sheen" id="sheen">KEEL</div></div>
+<div class="tag" id="tag">The plan can change. The goal stays.</div>
+</div></div><script>
+const $ = (id) => document.getElementById(id);
+const ease = (x) => { x = Math.min(1, Math.max(0, x)); return 1 - Math.pow(1 - x, 3); };
+const seg = (t, a, b) => ease((t - a) / (b - a));
+const draw = (el, k) => { const L = el.getTotalLength(); el.style.strokeDasharray = L; el.style.strokeDashoffset = L * (1 - k); };
+window.render = (t) => {
+  $('root').style.opacity = seg(t, 0, 0.8);
+  $('light').style.opacity = 0.3 + 0.7 * seg(t, 0.2, 2.6);
+  $('light').style.transform = 'translate(-50%,-50%) scale(' + (0.94 + 0.06 * seg(t, 0, 7)) + ')';
+  draw($('water'), seg(t, 0.4, 1.4));
+  $('fin').style.clipPath = 'inset(0 0 ' + (100 * (1 - seg(t, 1.0, 1.9))) + '% 0)';
+  $('old').style.opacity = 0.35 * seg(t, 1.3, 2.0);
+  draw($('nw'), seg(t, 1.7, 2.7));
+  draw($('arrow'), seg(t, 2.5, 2.95));
+  const w = seg(t, 2.8, 3.8), ls = 0.3 - 0.16 * w;
+  Object.assign($('word').style, { opacity: w, letterSpacing: ls + 'em', marginLeft: ls + 'em', transform: 'translateY(' + 16 * (1 - w) + 'px)' });
+  const s = Math.min(1, Math.max(0, (t - 3.7) / 1.1));
+  Object.assign($('sheen').style, { opacity: Math.sin(Math.PI * s) * 0.55, backgroundPosition: (100 - 100 * s) + '% 0' });
+  const g = seg(t, 4.0, 4.9);
+  Object.assign($('tag').style, { opacity: g, transform: 'translateY(' + 10 * (1 - g) + 'px)' });
+};
+window.render(0);
+</script></body></html>`;
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 const html = {
   title: () => `<body class="card"><div class="title">${LOGO}<h1>KEEL</h1><div class="tag">The plan can change. The goal stays.</div>
@@ -103,7 +152,7 @@ const html = {
     <div class="credits">Footage: unedited screen captures of the KEEL build at commit ${proof.commit}, on a local server; cuts, crops and marked speed changes only.
     Repair proposals shown as recorded model output were captured from claude-sonnet-5-5 and are re-validated live.
     Narration: synthetic voice (Kokoro-82M). Music: synthesised for this film. Evidence logs: docs/evidence/.</div>
-    <div class="end">KEEL · the plan can change, the goal stays.</div></div></body>`,
+    </div></body>`,
   chip: (chip) => `<body class="clear"><div class="chip"><i></i>${esc(chip)}<span class="sim">SIMULATED</span></div></body>`,
   tag: () => `<body class="clear"><div class="simtag"><span class="sim">SIMULATED WORLD</span></div></body>`,
   speed: (label) => `<body class="clear"><div class="speed">${label}</div></body>`,
@@ -127,7 +176,18 @@ let t = 0;
 const parts = [], overlays = [], cues = [];
 for (const [si, sc] of scenes.entries()) {
   const start = t;
-  if (sc.card) {
+  if (sc.card === 'logo') {
+    const n = frames(sc.len), file = `${TMP}s${si}.mp4`;
+    mkdirSync(`${TMP}logo`, { recursive: true });
+    await page.setContent(LOGO_REVEAL, { waitUntil: 'networkidle' });
+    await page.evaluate(() => document.fonts.ready);
+    for (let i = 0; i < n; i++) {
+      await page.evaluate((s) => window.render(s), i / FPS);
+      await page.screenshot({ path: `${TMP}logo/${String(i).padStart(4, '0')}.png` });
+    }
+    ff('-framerate', String(FPS), '-i', `${TMP}logo/%04d.png`, '-vf', 'format=yuv420p', '-frames:v', String(n), '-c:v', 'libx264', '-crf', '16', '-preset', 'medium', file);
+    parts.push(file); sc.starts = [start]; t += n / FPS;
+  } else if (sc.card) {
     const n = frames(sc.len);
     const file = `${TMP}s${si}.mp4`;
     const fade = si === 0 ? `fade=in:0:15,` : `fade=out:${n - 24}:24,`;
@@ -150,10 +210,12 @@ for (const [si, sc] of scenes.entries()) {
     }
     overlays.push({ file: await png(`chip${si}`, html.chip(sc.chip)), from: start, to: start + CHIP });
   }
-  for (const [id, shot, at] of sc.cues) cues.push({ id, at: sc.starts[shot] + at, sceneEnd: t });
+  for (const [id, shot, at] of sc.cues) cues.push({ id, at: sc.starts[shot] + at, sceneEnd: t, burn: !sc.nocap });
 }
 const total = t;
+if (total > 90) throw new Error(`film is ${total.toFixed(2)} s; the limit is 90 s`);
 for (const c of cues) if (c.at + voice[c.id] > c.sceneEnd + 0.05) console.warn(`cue ${c.id} overruns its scene by ${(c.at + voice[c.id] - c.sceneEnd).toFixed(2)} s`);
+for (const [i, c] of cues.slice(1).entries()) if (cues[i].at + voice[cues[i].id] > c.at - 0.1) throw new Error(`cue ${cues[i].id} runs into ${c.id}`);
 
 // ------------------------------------------------------------------ captions (burned in, and as SRT)
 const chunks = [];
@@ -161,11 +223,11 @@ for (const c of cues) {
   const pieces = text[c.id].split(/(?<=[.:])\s+/).flatMap((s) => (s.length > 74 ? s.split(/(?<=,)\s+/) : [s]));
   const speak = voice[c.id] - 0.35, weight = pieces.reduce((a, p) => a + p.length + 6, 0);
   let at = c.at;
-  for (const p of pieces) { const d = speak * (p.length + 6) / weight; chunks.push({ t: p, from: at, to: at + d }); at += d; }
+  for (const p of pieces) { const d = speak * (p.length + 6) / weight; chunks.push({ t: p, from: at, to: at + d, burn: c.burn }); at += d; }
 }
 const ts = (s) => new Date(s * 1000).toISOString().slice(11, 23).replace('.', ',');
 writeFileSync(F('./keel-film.srt'), chunks.map((c, i) => `${i + 1}\n${ts(c.from)} --> ${ts(c.to)}\n${c.t}\n`).join('\n'));
-for (const [i, c] of chunks.entries()) overlays.push({ file: await png(`c${i}`, html.cap(c.t)), from: c.from, to: c.to });
+for (const [i, c] of chunks.entries()) if (c.burn) overlays.push({ file: await png(`c${i}`, html.cap(c.t)), from: c.from, to: c.to });
 await browser.close();
 
 // ------------------------------------------------------------------ assemble video
@@ -189,10 +251,13 @@ const aIn = cues.flatMap((c) => ['-i', `${OUT}audio/${c.id}.wav`]);
 const af = [
   `${music},lowpass=f=1400,aecho=0.8:0.7:120|240:0.25|0.15,volume=0.55,afade=t=in:d=2,afade=t=out:st=${(total - 3).toFixed(2)}:d=3[mus]`,
   ...cues.map((c, i) => `[${i}:a]aresample=48000,pan=stereo|c0=c0|c1=c0,adelay=${Math.round(c.at * 1000)}|${Math.round(c.at * 1000)}[a${i}]`),
-  `${cues.map((_, i) => `[a${i}]`).join('')}amix=inputs=${cues.length}:normalize=0[vox]`,
-  `[mus][vox]amix=inputs=2:normalize=0,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000[aout]`,
+  `${cues.map((_, i) => `[a${i}]`).join('')}amix=inputs=${cues.length}:normalize=0,asplit[vox][key0]`,
+  `[key0]apad[key]`, // the compressor stops with its key input; the voice ends before the film does
+  // the music ducks under the voice so no word is masked (checked by ASR, see film/storyboard.md)
+  `[mus][key]sidechaincompress=threshold=0.03:ratio=6:attack=30:release=500[duck]`,
+  `[duck][vox]amix=inputs=2:normalize=0,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,apad[aout]`,
 ].join(';\n');
 writeFileSync(`${TMP}audio.txt`, af);
 ff(...aIn, '-/filter_complex', `${TMP}audio.txt`, '-map', '[aout]', '-t', total.toFixed(2), '-c:a', 'pcm_s16le', `${TMP}audio.wav`);
-ff('-i', `${TMP}video.mp4`, '-i', `${TMP}audio.wav`, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-movflags', '+faststart', '-shortest', `${OUT}keel-film.mp4`);
-console.log(`film: ${total.toFixed(2)} s, ${parts.length} shots, ${chunks.length} captions -> film/out/keel-film.mp4`);
+ff('-i', `${TMP}video.mp4`, '-i', `${TMP}audio.wav`, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-movflags', '+faststart', '-t', total.toFixed(3), `${OUT}keel-film-final.mp4`);
+console.log(`film: ${total.toFixed(2)} s, ${parts.length} shots, ${chunks.length} captions -> film/out/keel-film-final.mp4`);

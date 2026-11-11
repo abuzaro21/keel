@@ -1,11 +1,11 @@
 [
   {
     "id": "title",
-    "text": "Two agents. Same goal, same plan, same simulated world. Then reality changes."
+    "text": "Two agents, one goal, one simulated world. Then reality changes."
   },
   {
     "id": "delivery",
-    "text": "At tick six, route R1 closes. KEEL finds the one step that assumed R1 was open, keeps the three finished steps, and repairs only the rest. The repair was a recorded model proposal, validated now."
+    "text": "At tick six, route R1 closes. KEEL finds the step that assumed R1 was open, keeps the three finished steps, and repairs only the rest, with a recorded model proposal it validates live."
   },
   {
     "id": "delivery2",
@@ -37,6 +37,10 @@
   },
   {
     "id": "proof",
-    "text": "Tested on SQLite and Postgres, in the browser, and through a kill-and-takeover. Everything here is simulated. KEEL: the plan can change. The goal stays."
+    "text": "Tested on SQLite and Postgres, in the browser, and under kill-and-takeover. All of it simulated."
+  },
+  {
+    "id": "logo",
+    "text": "KEEL. The plan can change. The goal stays."
   }
 ]

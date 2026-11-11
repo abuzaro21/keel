@@ -2,6 +2,9 @@
 
 Nothing here has been run against Render yet: creating cloud resources is the owner's decision. This is the exact plan.
 
+State on 2026-11-11 (read through the Render API): the workspace **KEEL** exists and has no services, no Postgres and no
+Key Value instances, so its one free Postgres is available.
+
 ## What gets created
 
 | Resource | Plan | Notes |
@@ -45,6 +48,8 @@ node scripts/db.ts export "$DATABASE_URL" keel-dump.json        # external URL f
 node scripts/db.ts import "<new postgres url or path.db>" keel-dump.json
 ```
 
+Import claims the target database first (owner epoch), so run it before the new service starts, or restart the service
+afterwards: a service already running on that database is fenced by the import and answers 503 until it restarts.
 Import refuses a non-empty target and verifies counts. If nobody needs old demo sessions, letting the database expire
 and creating a fresh one is also fine: every scenario starts from scratch anyway.
 

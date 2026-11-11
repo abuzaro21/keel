@@ -20,6 +20,8 @@ try {
     console.log(`exported ${d.runs.length} runs, ${d.events.length} events, ${d.effects.length} effects, ${d.injections.length} injections`);
   } else {
     const d = JSON.parse(readFileSync(file, 'utf8')) as Dump;
+    // Own the target before checking it: a server that claims it meanwhile fences restore() instead of racing it.
+    await store.claim('db-import');
     if ((await store.runs()).length) throw new Error('target database is not empty; refusing to merge');
     await store.restore(d);
     const back = await store.dump();
